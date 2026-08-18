@@ -1,0 +1,479 @@
+#include "config.h"
+
+#include <string.h>
+
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
+#include "esp_attr.h"
+#include "esp_check.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "esp_rom_sys.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "hal/adc_types.h"
+#include "soc/soc_caps.h"
+
+static const char *TAG = "board";
+
+/* =========================================================================
+ * GPIO
+ * ====================================================================== */
+
+typedef struct {
+    gpio_num_t      pin;
+    gpio_int_type_t intr;
+    bool            pullup;
+} board_input_desc_t;
+
+/* Kept in RAM so the ISR never touches flash. */
+static board_input_desc_t s_in_desc[BOARD_IN_COUNT] = {
+    [BOARD_IN_CHRG]      = { PIN_CHRG,         GPIO_INTR_ANYEDGE, true  },
+    [BOARD_IN_STBY]      = { PIN_STBY,         GPIO_INTR_ANYEDGE, true  },
+    [BOARD_IN_TUBE_CNT]  = { PIN_TUBE_CNT,     GPIO_INTR_NEGEDGE, true  },
+    [BOARD_IN_VTUBE_OK]  = { PIN_VTUBE_OK,     GPIO_INTR_ANYEDGE, false },
+    [BOARD_IN_BTN_ENTER] = { PIN_BUTTON_ENTER, GPIO_INTR_ANYEDGE, true  },
+    [BOARD_IN_BTN_LEFT]  = { PIN_BUTTON_LEFT,  GPIO_INTR_ANYEDGE, true  },
+    [BOARD_IN_BTN_RIGHT] = { PIN_BUTTON_RIGHT, GPIO_INTR_ANYEDGE, true  },
+};
+
+static board_input_isr_t s_in_cb[BOARD_IN_COUNT];
+static void             *s_in_arg[BOARD_IN_COUNT];
+static volatile uint32_t s_tube_pulses;
+static portMUX_TYPE      s_in_lock = portMUX_INITIALIZER_UNLOCKED;
+
+static void IRAM_ATTR board_gpio_isr(void *arg)
+{
+    board_input_t in = (board_input_t)(uintptr_t)arg;
+    bool level = gpio_get_level(s_in_desc[in].pin);
+
+    if (in == BOARD_IN_TUBE_CNT) {
+        s_tube_pulses++;
+    }
+    if (s_in_cb[in]) {
+        s_in_cb[in](in, level, s_in_arg[in]);
+    }
+}
+
+static esp_err_t gpio_init(void)
+{
+    gpio_config_t out = {
+        .pin_bit_mask = BIT64(PIN_LATCH) | BIT64(PIN_CHARGE_EN) | BIT64(PIN_LED) |
+                        BIT64(PIN_LCD_RESET) | BIT64(PIN_LCD_A0),
+        .mode         = GPIO_MODE_OUTPUT,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    ESP_RETURN_ON_ERROR(gpio_config(&out), TAG, "output config failed");
+
+    gpio_set_level(PIN_LATCH, 0);
+    gpio_set_level(PIN_CHARGE_EN, 0);
+    gpio_set_level(PIN_LED, 0);
+    gpio_set_level(PIN_LCD_RESET, 0);
+    gpio_set_level(PIN_LCD_A0, 0);
+
+    for (int i = 0; i < BOARD_IN_COUNT; i++) {
+        gpio_config_t in = {
+            .pin_bit_mask = BIT64(s_in_desc[i].pin),
+            .mode         = GPIO_MODE_INPUT,
+            .pull_up_en   = s_in_desc[i].pullup ? GPIO_PULLUP_ENABLE : GPIO_PULLUP_DISABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type    = s_in_desc[i].intr,
+        };
+        ESP_RETURN_ON_ERROR(gpio_config(&in), TAG, "input %d config failed", i);
+    }
+
+    esp_err_t err = gpio_install_isr_service(ESP_INTR_FLAG_LEVEL1);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        return err;
+    }
+    for (int i = 0; i < BOARD_IN_COUNT; i++) {
+        ESP_RETURN_ON_ERROR(gpio_isr_handler_add(s_in_desc[i].pin, board_gpio_isr, (void *)(uintptr_t)i),
+                            TAG, "isr add %d failed", i);
+    }
+    return ESP_OK;
+}
+
+void board_set_latch(bool on)     { gpio_set_level(PIN_LATCH, on); }
+void board_set_charge_en(bool on) { gpio_set_level(PIN_CHARGE_EN, on); }
+void board_set_led(bool on)       { gpio_set_level(PIN_LED, on); }
+
+bool board_input_level(board_input_t in)
+{
+    if (in >= BOARD_IN_COUNT) {
+        return false;
+    }
+    return gpio_get_level(s_in_desc[in].pin) != 0;
+}
+
+esp_err_t board_input_set_isr(board_input_t in, board_input_isr_t cb, void *arg)
+{
+    ESP_RETURN_ON_FALSE(in < BOARD_IN_COUNT, ESP_ERR_INVALID_ARG, TAG, "bad input");
+    portENTER_CRITICAL(&s_in_lock);
+    s_in_arg[in] = arg;
+    s_in_cb[in]  = cb;
+    portEXIT_CRITICAL(&s_in_lock);
+    return ESP_OK;
+}
+
+uint32_t board_tube_pulses(void)
+{
+    return s_tube_pulses;
+}
+
+/* =========================================================================
+ * PWM (LEDC)
+ * ====================================================================== */
+
+static uint32_t duty_from_pct(ledc_timer_bit_t res, float pct)
+{
+    if (pct < 0.0f) pct = 0.0f;
+    if (pct > 100.0f) pct = 100.0f;
+    return (uint32_t)(((1u << (uint32_t)res) - 1u) * (pct / 100.0f) + 0.5f);
+}
+
+static esp_err_t ledc_setup(ledc_timer_t timer, ledc_channel_t ch, gpio_num_t pin,
+                            ledc_timer_bit_t res, uint32_t freq)
+{
+    ledc_timer_config_t tcfg = {
+        .speed_mode      = PWM_SPEED_MODE,
+        .timer_num       = timer,
+        .duty_resolution = res,
+        .freq_hz         = freq,
+        .clk_cfg         = PWM_CLK_SRC,
+    };
+    ESP_RETURN_ON_ERROR(ledc_timer_config(&tcfg), TAG, "ledc timer %d failed", timer);
+
+    ledc_channel_config_t ccfg = {
+        .speed_mode = PWM_SPEED_MODE,
+        .channel    = ch,
+        .timer_sel  = timer,
+        .intr_type  = LEDC_INTR_DISABLE,
+        .gpio_num   = pin,
+        .duty       = 0,
+        .hpoint     = 0,
+    };
+    return ledc_channel_config(&ccfg);
+}
+
+static esp_err_t pwm_init(void)
+{
+    ESP_RETURN_ON_ERROR(ledc_setup(PWM_TUBE_TIMER, PWM_TUBE_CHANNEL, PIN_PWM_TUBE,
+                                   PWM_TUBE_RES, PWM_TUBE_FREQ_HZ), TAG, "hv pwm");
+    ESP_RETURN_ON_ERROR(ledc_setup(PWM_BACKLIGHT_TIMER, PWM_BACKLIGHT_CHANNEL, PIN_PWM_LCD,
+                                   PWM_BACKLIGHT_RES, PWM_BACKLIGHT_FREQ_HZ), TAG, "backlight pwm");
+    ESP_RETURN_ON_ERROR(ledc_setup(PWM_BUZZER_TIMER, PWM_BUZZER_CHANNEL, PIN_PWM_BUZZER,
+                                   PWM_BUZZER_RES, PWM_BUZZER_FREQ_HZ), TAG, "buzzer pwm");
+    return ESP_OK;
+}
+
+static esp_err_t pwm_apply(ledc_channel_t ch, uint32_t duty)
+{
+    ESP_RETURN_ON_ERROR(ledc_set_duty(PWM_SPEED_MODE, ch, duty), TAG, "set duty");
+    return ledc_update_duty(PWM_SPEED_MODE, ch);
+}
+
+esp_err_t board_hv_set_duty(float duty_pct)
+{
+    if (duty_pct > PWM_TUBE_DUTY_MAX_PCT) {
+        duty_pct = PWM_TUBE_DUTY_MAX_PCT;
+    }
+    return pwm_apply(PWM_TUBE_CHANNEL, duty_from_pct(PWM_TUBE_RES, duty_pct));
+}
+
+esp_err_t board_hv_set_freq(uint32_t freq_hz)
+{
+    return ledc_set_freq(PWM_SPEED_MODE, PWM_TUBE_TIMER, freq_hz);
+}
+
+esp_err_t board_backlight_set(uint8_t duty_pct)
+{
+    return pwm_apply(PWM_BACKLIGHT_CHANNEL, duty_from_pct(PWM_BACKLIGHT_RES, duty_pct));
+}
+
+esp_err_t board_buzzer_on(uint32_t freq_hz, uint8_t duty_pct)
+{
+    if (freq_hz) {
+        ESP_RETURN_ON_ERROR(ledc_set_freq(PWM_SPEED_MODE, PWM_BUZZER_TIMER, freq_hz), TAG, "buzzer freq");
+    }
+    return pwm_apply(PWM_BUZZER_CHANNEL, duty_from_pct(PWM_BUZZER_RES, duty_pct));
+}
+
+esp_err_t board_buzzer_off(void)
+{
+    return pwm_apply(PWM_BUZZER_CHANNEL, 0);
+}
+
+/* =========================================================================
+ * ADC - continuous conversion + calibration
+ * ====================================================================== */
+
+static adc_continuous_handle_t s_adc;
+static adc_cali_handle_t       s_adc_cali[BOARD_ADC_CH_COUNT];
+static adc_channel_t           s_adc_chan[BOARD_ADC_CH_COUNT];
+static volatile int            s_adc_acc[BOARD_ADC_CH_COUNT];  /* IIR accumulator, Q<IIR_SHIFT> */
+static TaskHandle_t            s_adc_task;
+
+static const gpio_num_t s_adc_pin[BOARD_ADC_CH_COUNT] = {
+    [BOARD_ADC_VLATCH] = PIN_ADC_VLATCH,
+    [BOARD_ADC_TUBE]   = PIN_ADC_TUBE,
+};
+
+static bool IRAM_ATTR adc_conv_done(adc_continuous_handle_t handle,
+                                    const adc_continuous_evt_data_t *edata, void *user_data)
+{
+    BaseType_t hp_woken = pdFALSE;
+    vTaskNotifyGiveFromISR(s_adc_task, &hp_woken);
+    return hp_woken == pdTRUE;
+}
+
+static esp_err_t adc_cali_create(adc_unit_t unit, adc_channel_t chan, adc_cali_handle_t *out)
+{
+#if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
+    adc_cali_curve_fitting_config_t cfg = {
+        .unit_id  = unit,
+        .chan     = chan,
+        .atten    = BOARD_ADC_ATTEN,
+        .bitwidth = SOC_ADC_DIGI_MAX_BITWIDTH,
+    };
+    return adc_cali_create_scheme_curve_fitting(&cfg, out);
+#elif ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED
+    adc_cali_line_fitting_config_t cfg = {
+        .unit_id  = unit,
+        .atten    = BOARD_ADC_ATTEN,
+        .bitwidth = SOC_ADC_DIGI_MAX_BITWIDTH,
+    };
+    return adc_cali_create_scheme_line_fitting(&cfg, out);
+#else
+    *out = NULL;
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
+
+static void adc_task(void *arg)
+{
+    uint8_t *frame = heap_caps_malloc(BOARD_ADC_FRAME_BYTES, MALLOC_CAP_DEFAULT);
+    if (!frame) {
+        ESP_LOGE(TAG, "no memory for adc frame");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        uint32_t len = 0;
+        while (adc_continuous_read(s_adc, frame, BOARD_ADC_FRAME_BYTES, &len, 0) == ESP_OK) {
+            for (uint32_t i = 0; i + SOC_ADC_DIGI_RESULT_BYTES <= len; i += SOC_ADC_DIGI_RESULT_BYTES) {
+                adc_digi_output_data_t *p = (adc_digi_output_data_t *)&frame[i];
+                uint32_t chan = p->type2.channel;
+                uint32_t data = p->type2.data;
+
+                for (int c = 0; c < BOARD_ADC_CH_COUNT; c++) {
+                    if (s_adc_chan[c] != chan) {
+                        continue;
+                    }
+                    int acc = s_adc_acc[c];
+                    s_adc_acc[c] = acc + (int)data - (acc >> BOARD_ADC_IIR_SHIFT);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+static esp_err_t adc_init(void)
+{
+    adc_unit_t unit = ADC_UNIT_1;
+    adc_digi_pattern_config_t pattern[BOARD_ADC_CH_COUNT] = {0};
+
+    for (int c = 0; c < BOARD_ADC_CH_COUNT; c++) {
+        adc_unit_t u;
+        ESP_RETURN_ON_ERROR(adc_continuous_io_to_channel(s_adc_pin[c], &u, &s_adc_chan[c]),
+                            TAG, "GPIO%d is not an ADC pin", s_adc_pin[c]);
+        ESP_RETURN_ON_FALSE(c == 0 || u == unit, ESP_ERR_INVALID_ARG, TAG,
+                            "all ADC pins must belong to the same unit");
+        unit = u;
+
+        pattern[c].atten     = BOARD_ADC_ATTEN;
+        pattern[c].channel   = s_adc_chan[c] & 0x7;
+        pattern[c].unit      = unit;
+        pattern[c].bit_width = SOC_ADC_DIGI_MAX_BITWIDTH;
+
+        if (adc_cali_create(unit, s_adc_chan[c], &s_adc_cali[c]) != ESP_OK) {
+            ESP_LOGW(TAG, "no eFuse calibration for ch %d, raw values only", c);
+        }
+    }
+
+    adc_continuous_handle_cfg_t hcfg = {
+        .max_store_buf_size = BOARD_ADC_POOL_BYTES,
+        .conv_frame_size    = BOARD_ADC_FRAME_BYTES,
+    };
+    ESP_RETURN_ON_ERROR(adc_continuous_new_handle(&hcfg, &s_adc), TAG, "adc handle");
+
+    adc_continuous_config_t ccfg = {
+        .pattern_num    = BOARD_ADC_CH_COUNT,
+        .adc_pattern    = pattern,
+        .sample_freq_hz = BOARD_ADC_SAMPLE_HZ,
+        .conv_mode      = ADC_CONV_SINGLE_UNIT_1,
+        .format         = ADC_DIGI_OUTPUT_FORMAT_TYPE2,
+    };
+    ESP_RETURN_ON_ERROR(adc_continuous_config(s_adc, &ccfg), TAG, "adc config");
+
+    ESP_RETURN_ON_FALSE(xTaskCreate(adc_task, "adc", 3072, NULL, 6, &s_adc_task) == pdPASS,
+                        ESP_ERR_NO_MEM, TAG, "adc task");
+
+    adc_continuous_evt_cbs_t cbs = { .on_conv_done = adc_conv_done };
+    ESP_RETURN_ON_ERROR(adc_continuous_register_event_callbacks(s_adc, &cbs, NULL), TAG, "adc cbs");
+
+    return adc_continuous_start(s_adc);
+}
+
+esp_err_t board_adc_get_raw(board_adc_ch_t ch, int *raw)
+{
+    ESP_RETURN_ON_FALSE(ch < BOARD_ADC_CH_COUNT && raw, ESP_ERR_INVALID_ARG, TAG, "bad arg");
+    *raw = s_adc_acc[ch] >> BOARD_ADC_IIR_SHIFT;
+    return ESP_OK;
+}
+
+esp_err_t board_adc_get_mv(board_adc_ch_t ch, int *mv)
+{
+    int raw;
+    ESP_RETURN_ON_ERROR(board_adc_get_raw(ch, &raw), TAG, "raw");
+    ESP_RETURN_ON_FALSE(s_adc_cali[ch], ESP_ERR_NOT_SUPPORTED, TAG, "not calibrated");
+    return adc_cali_raw_to_voltage(s_adc_cali[ch], raw, mv);
+}
+
+/* =========================================================================
+ * LCD - ST7565P on hardware SPI, driven through u8g2
+ * ====================================================================== */
+
+#define LCD_TX_BUF_SIZE 256
+
+static spi_device_handle_t s_lcd_spi;
+static u8g2_t              s_u8g2;
+static uint8_t            *s_lcd_tx;
+static size_t              s_lcd_tx_len;
+
+static void lcd_flush(void)
+{
+    if (!s_lcd_tx_len) {
+        return;
+    }
+    spi_transaction_t t = {
+        .length    = s_lcd_tx_len * 8,
+        .tx_buffer = s_lcd_tx,
+    };
+    spi_device_polling_transmit(s_lcd_spi, &t);
+    s_lcd_tx_len = 0;
+}
+
+static uint8_t u8x8_byte_esp_spi(u8x8_t *u8x8, uint8_t msg, uint8_t arg_int, void *arg_ptr)
+{
+    switch (msg) {
+    case U8X8_MSG_BYTE_SEND: {
+        const uint8_t *data = arg_ptr;
+        while (arg_int--) {
+            if (s_lcd_tx_len >= LCD_TX_BUF_SIZE) {
+                lcd_flush();
+            }
+            s_lcd_tx[s_lcd_tx_len++] = *data++;
+        }
+        break;
+    }
+    case U8X8_MSG_BYTE_SET_DC:
+        lcd_flush();  /* A0 may only change between transfers */
+        gpio_set_level(PIN_LCD_A0, arg_int);
+        break;
+    case U8X8_MSG_BYTE_END_TRANSFER:
+        lcd_flush();
+        break;
+    case U8X8_MSG_BYTE_INIT:
+    case U8X8_MSG_BYTE_START_TRANSFER:
+        break;
+    default:
+        return 0;
+    }
+    return 1;
+}
+
+static uint8_t u8x8_gpio_and_delay_esp(u8x8_t *u8x8, uint8_t msg, uint8_t arg_int, void *arg_ptr)
+{
+    switch (msg) {
+    case U8X8_MSG_GPIO_AND_DELAY_INIT:
+        break;
+    case U8X8_MSG_DELAY_MILLI:
+        vTaskDelay(pdMS_TO_TICKS(arg_int ? arg_int : 1));
+        break;
+    case U8X8_MSG_DELAY_10MICRO:
+        esp_rom_delay_us(10 * arg_int);
+        break;
+    case U8X8_MSG_DELAY_100NANO:
+        esp_rom_delay_us(1);
+        break;
+    case U8X8_MSG_GPIO_RESET:
+        gpio_set_level(PIN_LCD_RESET, arg_int);
+        break;
+    case U8X8_MSG_GPIO_DC:
+        gpio_set_level(PIN_LCD_A0, arg_int);
+        break;
+    case U8X8_MSG_GPIO_CS:
+        break;  /* driven by the SPI peripheral */
+    default:
+        return 0;
+    }
+    return 1;
+}
+
+static esp_err_t lcd_init(void)
+{
+    spi_bus_config_t bus = {
+        .mosi_io_num     = PIN_LCD_DATA0,
+        .miso_io_num     = -1,
+        .sclk_io_num     = PIN_LCD_CLOCK,
+        .quadwp_io_num   = -1,
+        .quadhd_io_num   = -1,
+        .max_transfer_sz = LCD_TX_BUF_SIZE,
+    };
+    ESP_RETURN_ON_ERROR(spi_bus_initialize(LCD_SPI_HOST, &bus, SPI_DMA_CH_AUTO), TAG, "spi bus");
+
+    spi_device_interface_config_t dev = {
+        .clock_speed_hz = LCD_SPI_CLOCK_HZ,
+        .mode           = LCD_SPI_MODE,
+        .spics_io_num   = PIN_LCD_CS,
+        .queue_size     = 1,
+    };
+    ESP_RETURN_ON_ERROR(spi_bus_add_device(LCD_SPI_HOST, &dev, &s_lcd_spi), TAG, "spi device");
+
+    s_lcd_tx = heap_caps_malloc(LCD_TX_BUF_SIZE, MALLOC_CAP_DMA);
+    ESP_RETURN_ON_FALSE(s_lcd_tx, ESP_ERR_NO_MEM, TAG, "spi tx buffer");
+
+    LCD_U8G2_SETUP(&s_u8g2, LCD_U8G2_ROTATION, u8x8_byte_esp_spi, u8x8_gpio_and_delay_esp);
+    u8g2_InitDisplay(&s_u8g2);
+    u8g2_SetPowerSave(&s_u8g2, 0);
+    u8g2_SetContrast(&s_u8g2, LCD_CONTRAST_DEFAULT);
+    u8g2_ClearBuffer(&s_u8g2);
+    u8g2_SendBuffer(&s_u8g2);
+    return ESP_OK;
+}
+
+u8g2_t *board_lcd(void)
+{
+    return &s_u8g2;
+}
+
+/* =========================================================================
+ * Entry point
+ * ====================================================================== */
+
+esp_err_t board_init(void)
+{
+    ESP_RETURN_ON_ERROR(gpio_init(), TAG, "gpio init failed");
+    board_set_latch(true);  /* keep the power latch closed while running */
+
+    ESP_RETURN_ON_ERROR(pwm_init(), TAG, "pwm init failed");
+    ESP_RETURN_ON_ERROR(adc_init(), TAG, "adc init failed");
+    ESP_RETURN_ON_ERROR(lcd_init(), TAG, "lcd init failed");
+
+    ESP_LOGI(TAG, "board ready");
+    return ESP_OK;
+}

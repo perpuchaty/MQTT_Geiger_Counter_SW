@@ -1,0 +1,5 @@
+dependencies:
+  idf:
+    version: ">=5.3"
+  nixy4/u8g2:
+    version: "^0.1.4"
