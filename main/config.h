@@ -112,6 +112,9 @@ typedef void (*board_input_isr_t)(board_input_t input, bool level, void *arg);
  * ---------------------------------------------------------------------- */
 esp_err_t board_init(void);
 
+/** Pushes the persisted settings (charging, LED, backlight) to the hardware. */
+void board_apply_settings(void);
+
 /* Outputs */
 void board_set_latch(bool on);
 void board_set_charge_en(bool on);

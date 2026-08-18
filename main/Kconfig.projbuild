@@ -114,4 +114,63 @@ menu "Geiger Counter"
 
     endmenu
 
+    menu "Tube / measurement"
+
+        comment "Defaults only, every value can be changed from the web UI"
+
+        config GEIGER_TUBE_WINDOW_S
+            int "Sliding window used to derive CPM (s)"
+            range 5 300
+            default 60
+
+        config GEIGER_TUBE_CPM_PER_USVH_X10
+            int "Tube sensitivity, CPM per uSv/h x10"
+            range 10 100000
+            default 1538
+            help
+                Counts per minute that correspond to 1 uSv/h, multiplied by ten.
+                1538 means 153.8 CPM per uSv/h, which is the SBM-20 figure.
+
+        config GEIGER_TUBE_TARGET_V
+            int "Tube target voltage (V)"
+            range 200 600
+            default 400
+
+    endmenu
+
+    menu "Speaker, LED and display"
+
+        comment "Defaults only, every value can be changed from the web UI"
+
+        config GEIGER_SPK_VOLUME
+            int "Speaker volume (%)"
+            range 0 100
+            default 60
+            help
+                0 mutes the speaker.
+
+        config GEIGER_SPK_SOUND
+            int "Click length: 0 short, 1 normal, 2 long"
+            range 0 2
+            default 1
+
+        config GEIGER_BATT_CHARGE_EN
+            bool "Enable battery charging"
+            default y
+
+        config GEIGER_LED_ENABLED
+            bool "Enable the indicator LED"
+            default y
+
+        config GEIGER_LCD_BRIGHTNESS
+            int "LCD backlight brightness (%)"
+            range 0 100
+            default 70
+
+        config GEIGER_LCD_AUTO_DIM
+            bool "Dim the LCD backlight when idle"
+            default y
+
+    endmenu
+
 endmenu

@@ -523,6 +523,22 @@ static void json_get_u16(const cJSON *root, const char *key, uint16_t *dst)
     }
 }
 
+static void json_get_u8(const cJSON *root, const char *key, uint8_t *dst)
+{
+    const cJSON *item = cJSON_GetObjectItem(root, key);
+    if (cJSON_IsNumber(item) && item->valuedouble >= 0 && item->valuedouble <= UINT8_MAX) {
+        *dst = (uint8_t)item->valuedouble;
+    }
+}
+
+static void json_get_float(const cJSON *root, const char *key, float *dst)
+{
+    const cJSON *item = cJSON_GetObjectItem(root, key);
+    if (cJSON_IsNumber(item)) {
+        *dst = (float)item->valuedouble;
+    }
+}
+
 static esp_err_t settings_get_handler(httpd_req_t *req)
 {
     const settings_t *cfg = settings_get();
@@ -539,6 +555,15 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     cJSON_AddStringToObject(root, "mqtt_ha_prefix", cfg->mqtt_ha_prefix);
     cJSON_AddNumberToObject(root, "mqtt_interval_s", cfg->mqtt_interval_s);
     cJSON_AddStringToObject(root, "mqtt_state", mqtt_state_str());
+    cJSON_AddNumberToObject(root, "tube_window_s", cfg->tube_window_s);
+    cJSON_AddNumberToObject(root, "tube_cpm_per_usvh", cfg->tube_cpm_per_usvh);
+    cJSON_AddNumberToObject(root, "tube_target_v", cfg->tube_target_v);
+    cJSON_AddNumberToObject(root, "spk_volume", cfg->spk_volume);
+    cJSON_AddNumberToObject(root, "spk_sound", cfg->spk_sound);
+    cJSON_AddBoolToObject(root, "batt_charge_en", cfg->batt_charge_en);
+    cJSON_AddBoolToObject(root, "led_enabled", cfg->led_enabled);
+    cJSON_AddNumberToObject(root, "lcd_brightness", cfg->lcd_brightness);
+    cJSON_AddBoolToObject(root, "lcd_auto_dim", cfg->lcd_auto_dim);
     return send_json(req, root);
 }
 
@@ -570,11 +595,21 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
     json_get_bool(root, "mqtt_discovery", &cfg.mqtt_discovery);
     json_get_str(root, "mqtt_ha_prefix", cfg.mqtt_ha_prefix, sizeof(cfg.mqtt_ha_prefix));
     json_get_u16(root, "mqtt_interval_s", &cfg.mqtt_interval_s);
+    json_get_u16(root, "tube_window_s", &cfg.tube_window_s);
+    json_get_float(root, "tube_cpm_per_usvh", &cfg.tube_cpm_per_usvh);
+    json_get_u16(root, "tube_target_v", &cfg.tube_target_v);
+    json_get_u8(root, "spk_volume", &cfg.spk_volume);
+    json_get_u8(root, "spk_sound", &cfg.spk_sound);
+    json_get_bool(root, "batt_charge_en", &cfg.batt_charge_en);
+    json_get_bool(root, "led_enabled", &cfg.led_enabled);
+    json_get_u8(root, "lcd_brightness", &cfg.lcd_brightness);
+    json_get_bool(root, "lcd_auto_dim", &cfg.lcd_auto_dim);
     cJSON_Delete(root);
 
     if (settings_save(&cfg) != ESP_OK) {
         return httpd_resp_send_500(req);
     }
+    board_apply_settings();
     mqtt_apply();
 
     cJSON *resp = cJSON_CreateObject();

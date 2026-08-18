@@ -12,6 +12,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "hal/adc_types.h"
+#include "settings.h"
 #include "soc/soc_caps.h"
 
 static const char *TAG = "board";
@@ -476,4 +477,15 @@ esp_err_t board_init(void)
 
     ESP_LOGI(TAG, "board ready");
     return ESP_OK;
+}
+
+void board_apply_settings(void)
+{
+    const settings_t *cfg = settings_get();
+
+    board_set_charge_en(cfg->batt_charge_en);
+    if (!cfg->led_enabled) {
+        board_set_led(false);
+    }
+    board_backlight_set(cfg->lcd_brightness);
 }

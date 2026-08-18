@@ -13,7 +13,9 @@ static const char *TAG = "settings";
 
 typedef enum {
     T_BOOL,
+    T_U8,
     T_U16,
+    T_FLOAT,
     T_STR,
 } setting_type_t;
 
@@ -27,15 +29,24 @@ typedef struct {
 #define S_FIELD(k, t, f) { k, t, offsetof(settings_t, f), sizeof(((settings_t *)0)->f) }
 
 static const setting_desc_t s_desc[] = {
-    S_FIELD("dev_name",   T_STR,  device_name),
-    S_FIELD("mq_en",      T_BOOL, mqtt_enabled),
-    S_FIELD("mq_uri",     T_STR,  mqtt_uri),
-    S_FIELD("mq_user",    T_STR,  mqtt_user),
-    S_FIELD("mq_pass",    T_STR,  mqtt_pass),
-    S_FIELD("mq_topic",   T_STR,  mqtt_topic),
-    S_FIELD("mq_disc",    T_BOOL, mqtt_discovery),
-    S_FIELD("mq_ha_pfx",  T_STR,  mqtt_ha_prefix),
-    S_FIELD("mq_period",  T_U16,  mqtt_interval_s),
+    S_FIELD("dev_name",   T_STR,   device_name),
+    S_FIELD("mq_en",      T_BOOL,  mqtt_enabled),
+    S_FIELD("mq_uri",     T_STR,   mqtt_uri),
+    S_FIELD("mq_user",    T_STR,   mqtt_user),
+    S_FIELD("mq_pass",    T_STR,   mqtt_pass),
+    S_FIELD("mq_topic",   T_STR,   mqtt_topic),
+    S_FIELD("mq_disc",    T_BOOL,  mqtt_discovery),
+    S_FIELD("mq_ha_pfx",  T_STR,   mqtt_ha_prefix),
+    S_FIELD("mq_period",  T_U16,   mqtt_interval_s),
+    S_FIELD("tube_win",   T_U16,   tube_window_s),
+    S_FIELD("tube_cpm",   T_FLOAT, tube_cpm_per_usvh),
+    S_FIELD("tube_v",     T_U16,   tube_target_v),
+    S_FIELD("spk_vol",    T_U8,    spk_volume),
+    S_FIELD("spk_snd",    T_U8,    spk_sound),
+    S_FIELD("chg_en",     T_BOOL,  batt_charge_en),
+    S_FIELD("led_en",     T_BOOL,  led_enabled),
+    S_FIELD("lcd_bri",    T_U8,    lcd_brightness),
+    S_FIELD("lcd_dim",    T_BOOL,  lcd_auto_dim),
 };
 
 static settings_t s_cfg;
@@ -58,6 +69,50 @@ static void settings_defaults(settings_t *c)
     strlcpy(c->mqtt_pass, CONFIG_GEIGER_MQTT_PASS, sizeof(c->mqtt_pass));
     strlcpy(c->mqtt_topic, CONFIG_GEIGER_MQTT_TOPIC, sizeof(c->mqtt_topic));
     strlcpy(c->mqtt_ha_prefix, CONFIG_GEIGER_MQTT_HA_PREFIX, sizeof(c->mqtt_ha_prefix));
+
+    c->tube_window_s     = CONFIG_GEIGER_TUBE_WINDOW_S;
+    c->tube_cpm_per_usvh = CONFIG_GEIGER_TUBE_CPM_PER_USVH_X10 / 10.0f;
+    c->tube_target_v     = CONFIG_GEIGER_TUBE_TARGET_V;
+
+    c->spk_volume     = CONFIG_GEIGER_SPK_VOLUME;
+    c->spk_sound      = CONFIG_GEIGER_SPK_SOUND;
+    c->lcd_brightness = CONFIG_GEIGER_LCD_BRIGHTNESS;
+#ifdef CONFIG_GEIGER_LCD_AUTO_DIM
+    c->lcd_auto_dim = true;
+#endif
+#ifdef CONFIG_GEIGER_BATT_CHARGE_EN
+    c->batt_charge_en = true;
+#endif
+#ifdef CONFIG_GEIGER_LED_ENABLED
+    c->led_enabled = true;
+#endif
+}
+
+static uint16_t clamp_u16(uint16_t v, uint16_t lo, uint16_t hi)
+{
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+static void settings_clamp(settings_t *c)
+{
+    c->tube_window_s = clamp_u16(c->tube_window_s, TUBE_WINDOW_MIN_S, TUBE_WINDOW_MAX_S);
+    c->tube_target_v = clamp_u16(c->tube_target_v, TUBE_TARGET_MIN_V, TUBE_TARGET_MAX_V);
+    c->mqtt_interval_s = clamp_u16(c->mqtt_interval_s, 1, 3600);
+
+    if (!(c->tube_cpm_per_usvh >= TUBE_CPM_MIN)) {
+        c->tube_cpm_per_usvh = TUBE_CPM_MIN;   /* also catches NaN */
+    } else if (c->tube_cpm_per_usvh > TUBE_CPM_MAX) {
+        c->tube_cpm_per_usvh = TUBE_CPM_MAX;
+    }
+    if (c->spk_volume > 100) {
+        c->spk_volume = 100;
+    }
+    if (c->lcd_brightness > 100) {
+        c->lcd_brightness = 100;
+    }
+    if (c->spk_sound >= SOUND_TYPE_COUNT) {
+        c->spk_sound = SOUND_NORMAL;
+    }
 }
 
 static void settings_load(nvs_handle_t nvs, settings_t *c)
@@ -74,9 +129,19 @@ static void settings_load(nvs_handle_t nvs, settings_t *c)
             }
             break;
         }
+        case T_U8:
+            nvs_get_u8(nvs, d->key, (uint8_t *)field);
+            break;
         case T_U16:
             nvs_get_u16(nvs, d->key, (uint16_t *)field);
             break;
+        case T_FLOAT: {
+            uint32_t bits;
+            if (nvs_get_u32(nvs, d->key, &bits) == ESP_OK) {
+                memcpy(field, &bits, sizeof(bits));
+            }
+            break;
+        }
         case T_STR: {
             size_t len = d->size;
             nvs_get_str(nvs, d->key, (char *)field, &len);
@@ -97,9 +162,18 @@ static esp_err_t settings_store(nvs_handle_t nvs, const settings_t *c)
         case T_BOOL:
             err = nvs_set_u8(nvs, d->key, *(const bool *)field ? 1 : 0);
             break;
+        case T_U8:
+            err = nvs_set_u8(nvs, d->key, *(const uint8_t *)field);
+            break;
         case T_U16:
             err = nvs_set_u16(nvs, d->key, *(const uint16_t *)field);
             break;
+        case T_FLOAT: {
+            uint32_t bits;
+            memcpy(&bits, field, sizeof(bits));
+            err = nvs_set_u32(nvs, d->key, bits);
+            break;
+        }
         default:
             err = nvs_set_str(nvs, d->key, (const char *)field);
             break;
@@ -123,6 +197,7 @@ esp_err_t settings_init(void)
 
     settings_load(nvs, &s_cfg);
     nvs_close(nvs);
+    settings_clamp(&s_cfg);
     return ESP_OK;
 }
 
@@ -135,14 +210,17 @@ esp_err_t settings_save(const settings_t *in)
 {
     ESP_RETURN_ON_FALSE(in, ESP_ERR_INVALID_ARG, TAG, "null settings");
 
+    settings_t cfg = *in;
+    settings_clamp(&cfg);
+
     nvs_handle_t nvs;
     ESP_RETURN_ON_ERROR(nvs_open(SETTINGS_NAMESPACE, NVS_READWRITE, &nvs), TAG, "nvs open");
 
-    esp_err_t err = settings_store(nvs, in);
+    esp_err_t err = settings_store(nvs, &cfg);
     nvs_close(nvs);
     ESP_RETURN_ON_ERROR(err, TAG, "commit");
 
-    s_cfg = *in;
+    s_cfg = cfg;
     ESP_LOGI(TAG, "settings saved");
     return ESP_OK;
 }

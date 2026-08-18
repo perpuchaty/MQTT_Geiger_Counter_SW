@@ -3,16 +3,14 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "settings.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/** Sliding window used to derive counts per minute. */
-#define GEIGER_WINDOW_SEC       60
-
-/** Tube sensitivity: counts per minute that correspond to 1 uSv/h (SBM-20). */
-#define GEIGER_CPM_PER_USVH     153.8f
+/** Longest sliding window the ring buffer can hold, see settings.tube_window_s. */
+#define GEIGER_WINDOW_MAX_SEC   TUBE_WINDOW_MAX_S
 
 /** Starts the background task that turns tube pulses into a rate. */
 esp_err_t geiger_start(void);

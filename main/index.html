@@ -30,16 +30,18 @@ li{display:flex;justify-content:space-between;gap:.5rem;padding:.7rem .8rem;curs
 li:first-child{border-top:none}
 li:hover,li.sel{background:#1c242c}
 .meta{color:#8a949e;font-size:.85rem;white-space:nowrap}
-input,button.wide{width:100%;padding:.7rem;margin-bottom:.7rem;border-radius:8px;border:1px solid #2a3138;
+input,select,button.wide{width:100%;padding:.7rem;margin-bottom:.7rem;border-radius:8px;border:1px solid #2a3138;
   background:#171d23;color:#e6e6e6;font-size:1rem}
 button.wide{background:#2f7dd1;border-color:#2f7dd1;font-weight:600;cursor:pointer}
 button.wide.alt{background:#171d23;border-color:#2a3138;font-weight:400}
 button.wide:disabled{opacity:.5;cursor:default}
+input[type=range]{padding:0;border:none;background:none;accent-color:#2f7dd1}
 label{display:block;color:#8a949e;font-size:.78rem;text-transform:uppercase;letter-spacing:.04em;margin-bottom:.25rem}
 label.row{display:flex;align-items:center;gap:.5rem;text-transform:none;font-size:.95rem;letter-spacing:0;
   color:#e6e6e6;margin-bottom:.8rem}
 label.row input{width:auto;margin:0}
-#msg,#mqttmsg{min-height:1.4rem;font-size:.9rem;color:#8a949e}
+label output{float:right;color:#e6e6e6;font-variant-numeric:tabular-nums}
+#msg,#mqttmsg,#tubemsg,#devmsg{min-height:1.4rem;font-size:.9rem;color:#8a949e}
 .soon{color:#8a949e;font-size:.9rem;line-height:1.5}
 .banner{display:none;align-items:center;justify-content:space-between;gap:.6rem;margin-bottom:1rem;
   padding:.6rem .8rem;border:1px solid #4a3a1a;background:#241d10;border-radius:10px;font-size:.9rem}
@@ -59,7 +61,7 @@ label.row input{width:auto;margin:0}
   <button data-tab="wifi">Wi-Fi</button>
   <button data-tab="mqtt">MQTT</button>
   <button data-tab="tube">Tube</button>
-  <button data-tab="alarm">Alarm</button>
+  <button data-tab="device">Device</button>
   <button data-tab="system">System</button>
 </nav>
 
@@ -110,10 +112,32 @@ label.row input{width:auto;margin:0}
 </section>
 
 <section id="tube">
-  <p class="soon">Tube settings (HV target, dead time, conversion factor) will live here.</p>
+  <label for="tb_v">Target tube voltage (V)</label>
+  <input id="tb_v" type="number" min="200" max="600" step="5">
+  <label for="tb_win">Averaging window (s)</label>
+  <input id="tb_win" type="number" min="5" max="300">
+  <label for="tb_cpm">Sensitivity (CPM per &micro;Sv/h)</label>
+  <input id="tb_cpm" type="number" min="1" max="10000" step="0.1">
+  <button class="wide" id="tubesave" type="button">Save</button>
+  <div id="tubemsg"></div>
 </section>
-<section id="alarm">
-  <p class="soon">Alarm thresholds and buzzer settings will live here.</p>
+
+<section id="device">
+  <label for="spk_vol">Speaker volume <output id="spk_vol_v"></output></label>
+  <input id="spk_vol" type="range" min="0" max="100">
+  <label for="spk_snd">Click length</label>
+  <select id="spk_snd">
+    <option value="0">Short</option>
+    <option value="1">Normal</option>
+    <option value="2">Long</option>
+  </select>
+  <label for="lcd_bri">LCD brightness <output id="lcd_bri_v"></output></label>
+  <input id="lcd_bri" type="range" min="0" max="100">
+  <label class="row"><input type="checkbox" id="lcd_dim"> Dim the LCD when idle</label>
+  <label class="row"><input type="checkbox" id="led_en"> Indicator LED</label>
+  <label class="row"><input type="checkbox" id="chg_en"> Battery charging</label>
+  <button class="wide" id="devsave" type="button">Save</button>
+  <div id="devmsg"></div>
 </section>
 
 <section id="system">
@@ -220,7 +244,7 @@ $('rescan').onclick = scan;
 $('save').onclick = save;
 $('gowifi').onclick = () => { show('wifi'); if (!$('list').children.length) scan(); };
 
-/* ---- mqtt tab ---- */
+/* ---- settings tabs ---- */
 const mqttMsg = t => $('mqttmsg').textContent = t;
 let passStored = false;
 
@@ -239,12 +263,44 @@ async function loadSettings(fill = true) {
     $('mq_int').value = s.mqtt_interval_s;
     passStored = s.mqtt_pass_set;
     $('mq_pass').placeholder = passStored ? '\u2022\u2022\u2022\u2022 unchanged' : 'optional';
+
+    $('tb_v').value = s.tube_target_v;
+    $('tb_win').value = s.tube_window_s;
+    $('tb_cpm').value = s.tube_cpm_per_usvh;
+
+    $('spk_vol').value = s.spk_volume;
+    $('spk_snd').value = s.spk_sound;
+    $('lcd_bri').value = s.lcd_brightness;
+    $('lcd_dim').checked = s.lcd_auto_dim;
+    $('led_en').checked = s.led_enabled;
+    $('chg_en').checked = s.batt_charge_en;
+    sliders();
   } catch (e) { mqttMsg('Could not load settings'); }
 }
 
-async function saveSettings() {
-  $('mqttsave').disabled = true;
-  mqttMsg('Saving\u2026');
+/* Only the listed fields are sent, the firmware keeps the rest as they are. */
+async function post(body, btn, out) {
+  $(btn).disabled = true;
+  $(out).textContent = 'Saving\u2026';
+  try {
+    const r = await (await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    })).json();
+    $(out).textContent = r.ok ? 'Saved' : 'Save failed';
+  } catch (e) { $(out).textContent = 'Save failed'; }
+  $(btn).disabled = false;
+}
+
+function sliders() {
+  $('spk_vol_v').textContent = $('spk_vol').value + '%';
+  $('lcd_bri_v').textContent = $('lcd_bri').value + '%';
+}
+$('spk_vol').oninput = sliders;
+$('lcd_bri').oninput = sliders;
+
+$('mqttsave').onclick = async () => {
   const body = {
     device_name: $('dev_name').value,
     mqtt_enabled: $('mq_en').checked,
@@ -257,21 +313,25 @@ async function saveSettings() {
   };
   /* An empty box keeps the stored password, unless none was stored yet. */
   if ($('mq_pass').value || !passStored) body.mqtt_pass = $('mq_pass').value;
+  await post(body, 'mqttsave', 'mqttmsg');
+  $('mq_pass').value = '';
+  setTimeout(loadSettings, 2000);
+};
 
-  try {
-    const r = await (await fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    })).json();
-    $('mq_pass').value = '';
-    mqttMsg(r.ok ? 'Saved' : 'Save failed');
-    setTimeout(loadSettings, 2000);
-  } catch (e) { mqttMsg('Save failed'); }
-  $('mqttsave').disabled = false;
-}
+$('tubesave').onclick = () => post({
+  tube_target_v: Number($('tb_v').value),
+  tube_window_s: Number($('tb_win').value),
+  tube_cpm_per_usvh: Number($('tb_cpm').value)
+}, 'tubesave', 'tubemsg');
 
-$('mqttsave').onclick = saveSettings;
+$('devsave').onclick = () => post({
+  spk_volume: Number($('spk_vol').value),
+  spk_sound: Number($('spk_snd').value),
+  lcd_brightness: Number($('lcd_bri').value),
+  lcd_auto_dim: $('lcd_dim').checked,
+  led_enabled: $('led_en').checked,
+  batt_charge_en: $('chg_en').checked
+}, 'devsave', 'devmsg');
 
 (async () => {
   await status();
