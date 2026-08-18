@@ -24,16 +24,18 @@ typedef struct {
     setting_type_t type;
     size_t         offset;
     size_t         size;
+    bool           secret; /* never printed in clear */
 } setting_desc_t;
 
-#define S_FIELD(k, t, f) { k, t, offsetof(settings_t, f), sizeof(((settings_t *)0)->f) }
+#define S_FIELD(k, t, f)  { k, t, offsetof(settings_t, f), sizeof(((settings_t *)0)->f), false }
+#define S_SECRET(k, t, f) { k, t, offsetof(settings_t, f), sizeof(((settings_t *)0)->f), true }
 
 static const setting_desc_t s_desc[] = {
     S_FIELD("dev_name",   T_STR,   device_name),
     S_FIELD("mq_en",      T_BOOL,  mqtt_enabled),
     S_FIELD("mq_uri",     T_STR,   mqtt_uri),
     S_FIELD("mq_user",    T_STR,   mqtt_user),
-    S_FIELD("mq_pass",    T_STR,   mqtt_pass),
+    S_SECRET("mq_pass",   T_STR,   mqtt_pass),
     S_FIELD("mq_topic",   T_STR,   mqtt_topic),
     S_FIELD("mq_disc",    T_BOOL,  mqtt_discovery),
     S_FIELD("mq_ha_pfx",  T_STR,   mqtt_ha_prefix),
@@ -115,40 +117,86 @@ static void settings_clamp(settings_t *c)
     }
 }
 
-static void settings_load(nvs_handle_t nvs, settings_t *c)
+static void log_field(const char *action, const setting_desc_t *d, const void *field)
 {
+    switch (d->type) {
+    case T_BOOL:
+        ESP_LOGI(TAG, "%s %-9s = %s", action, d->key, *(const bool *)field ? "true" : "false");
+        break;
+    case T_U8:
+        ESP_LOGI(TAG, "%s %-9s = %u", action, d->key, (unsigned)*(const uint8_t *)field);
+        break;
+    case T_U16:
+        ESP_LOGI(TAG, "%s %-9s = %u", action, d->key, (unsigned)*(const uint16_t *)field);
+        break;
+    case T_FLOAT: {
+        /* printed as x.y, the log formatter has no float support with nano libc */
+        int scaled = (int)(*(const float *)field * 10.0f + 0.5f);
+        ESP_LOGI(TAG, "%s %-9s = %d.%d", action, d->key, scaled / 10, scaled % 10);
+        break;
+    }
+    default: {
+        const char *str = field;
+        ESP_LOGI(TAG, "%s %-9s = %s", action, d->key,
+                 d->secret ? (str[0] ? "<set>" : "<empty>") : str);
+        break;
+    }
+    }
+}
+
+static void settings_dump(const char *action, const settings_t *c)
+{
+    for (int i = 0; i < sizeof(s_desc) / sizeof(s_desc[0]); i++) {
+        log_field(action, &s_desc[i], (const uint8_t *)c + s_desc[i].offset);
+    }
+}
+
+static int settings_load(nvs_handle_t nvs, settings_t *c)
+{
+    int found = 0;
+
     for (int i = 0; i < sizeof(s_desc) / sizeof(s_desc[0]); i++) {
         const setting_desc_t *d = &s_desc[i];
         void *field = (uint8_t *)c + d->offset;
+        esp_err_t err;
 
         switch (d->type) {
         case T_BOOL: {
             uint8_t v;
-            if (nvs_get_u8(nvs, d->key, &v) == ESP_OK) {
+            err = nvs_get_u8(nvs, d->key, &v);
+            if (err == ESP_OK) {
                 *(bool *)field = v != 0;
             }
             break;
         }
         case T_U8:
-            nvs_get_u8(nvs, d->key, (uint8_t *)field);
+            err = nvs_get_u8(nvs, d->key, (uint8_t *)field);
             break;
         case T_U16:
-            nvs_get_u16(nvs, d->key, (uint16_t *)field);
+            err = nvs_get_u16(nvs, d->key, (uint16_t *)field);
             break;
         case T_FLOAT: {
             uint32_t bits;
-            if (nvs_get_u32(nvs, d->key, &bits) == ESP_OK) {
+            err = nvs_get_u32(nvs, d->key, &bits);
+            if (err == ESP_OK) {
                 memcpy(field, &bits, sizeof(bits));
             }
             break;
         }
-        case T_STR: {
+        default: {
             size_t len = d->size;
-            nvs_get_str(nvs, d->key, (char *)field, &len);
+            err = nvs_get_str(nvs, d->key, (char *)field, &len);
             break;
         }
         }
+
+        if (err == ESP_OK) {
+            found++;
+        } else if (err != ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGW(TAG, "read %s failed: %s", d->key, esp_err_to_name(err));
+        }
     }
+    return found;
 }
 
 static esp_err_t settings_store(nvs_handle_t nvs, const settings_t *c)
@@ -179,6 +227,7 @@ static esp_err_t settings_store(nvs_handle_t nvs, const settings_t *c)
             break;
         }
         ESP_RETURN_ON_ERROR(err, TAG, "store %s", d->key);
+        log_field("store", d, field);
     }
     return nvs_commit(nvs);
 }
@@ -190,14 +239,18 @@ esp_err_t settings_init(void)
     nvs_handle_t nvs;
     esp_err_t err = nvs_open(SETTINGS_NAMESPACE, NVS_READONLY, &nvs);
     if (err == ESP_ERR_NVS_NOT_FOUND) {
-        ESP_LOGI(TAG, "no stored settings, using defaults");
+        ESP_LOGI(TAG, "no stored settings, using compiled-in defaults");
+        settings_dump("default", &s_cfg);
         return ESP_OK;
     }
     ESP_RETURN_ON_ERROR(err, TAG, "nvs open");
 
-    settings_load(nvs, &s_cfg);
+    int found = settings_load(nvs, &s_cfg);
     nvs_close(nvs);
     settings_clamp(&s_cfg);
+
+    ESP_LOGI(TAG, "restored %d of %d keys from NVS", found, (int)(sizeof(s_desc) / sizeof(s_desc[0])));
+    settings_dump("load ", &s_cfg);
     return ESP_OK;
 }
 
@@ -221,7 +274,7 @@ esp_err_t settings_save(const settings_t *in)
     ESP_RETURN_ON_ERROR(err, TAG, "commit");
 
     s_cfg = cfg;
-    ESP_LOGI(TAG, "settings saved");
+    ESP_LOGI(TAG, "settings committed to NVS");
     return ESP_OK;
 }
 
@@ -238,5 +291,7 @@ esp_err_t settings_reset(void)
     ESP_RETURN_ON_ERROR(err, TAG, "erase");
 
     settings_defaults(&s_cfg);
+    ESP_LOGI(TAG, "settings erased, back to defaults");
+    settings_dump("default", &s_cfg);
     return ESP_OK;
 }
