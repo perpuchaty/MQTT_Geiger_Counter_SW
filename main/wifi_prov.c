@@ -19,7 +19,9 @@
 #include "geiger.h"
 #include "lwip/sockets.h"
 #include "mdns.h"
+#include "mqtt.h"
 #include "nvs_flash.h"
+#include "settings.h"
 #include "soc/soc_caps.h"
 
 static const char *TAG = "wifi";
@@ -493,8 +495,95 @@ static esp_err_t connect_post_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
 
-/* While the portal runs, anything unknown is redirected so phones pop up the sign-in page. */
-static esp_err_t redirect_handler(httpd_req_t *req)
+/* -------------------------------------------------------------------------
+ * Persisted settings
+ * ---------------------------------------------------------------------- */
+
+static void json_get_str(const cJSON *root, const char *key, char *dst, size_t len)
+{
+    const cJSON *item = cJSON_GetObjectItem(root, key);
+    if (cJSON_IsString(item)) {
+        strlcpy(dst, item->valuestring, len);
+    }
+}
+
+static void json_get_bool(const cJSON *root, const char *key, bool *dst)
+{
+    const cJSON *item = cJSON_GetObjectItem(root, key);
+    if (cJSON_IsBool(item)) {
+        *dst = cJSON_IsTrue(item);
+    }
+}
+
+static void json_get_u16(const cJSON *root, const char *key, uint16_t *dst)
+{
+    const cJSON *item = cJSON_GetObjectItem(root, key);
+    if (cJSON_IsNumber(item) && item->valuedouble > 0 && item->valuedouble < UINT16_MAX) {
+        *dst = (uint16_t)item->valuedouble;
+    }
+}
+
+static esp_err_t settings_get_handler(httpd_req_t *req)
+{
+    const settings_t *cfg = settings_get();
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "device_name", cfg->device_name);
+    cJSON_AddStringToObject(root, "device_id", mqtt_device_id());
+    cJSON_AddBoolToObject(root, "mqtt_enabled", cfg->mqtt_enabled);
+    cJSON_AddStringToObject(root, "mqtt_uri", cfg->mqtt_uri);
+    cJSON_AddStringToObject(root, "mqtt_user", cfg->mqtt_user);
+    cJSON_AddBoolToObject(root, "mqtt_pass_set", cfg->mqtt_pass[0] != '\0');
+    cJSON_AddStringToObject(root, "mqtt_topic", cfg->mqtt_topic);
+    cJSON_AddBoolToObject(root, "mqtt_discovery", cfg->mqtt_discovery);
+    cJSON_AddStringToObject(root, "mqtt_ha_prefix", cfg->mqtt_ha_prefix);
+    cJSON_AddNumberToObject(root, "mqtt_interval_s", cfg->mqtt_interval_s);
+    cJSON_AddStringToObject(root, "mqtt_state", mqtt_state_str());
+    return send_json(req, root);
+}
+
+static esp_err_t settings_post_handler(httpd_req_t *req)
+{
+    char body[768];
+    if (req->content_len >= sizeof(body)) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "payload too large");
+    }
+    int len = httpd_req_recv(req, body, req->content_len);
+    if (len <= 0) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no payload");
+    }
+    body[len] = '\0';
+
+    cJSON *root = cJSON_Parse(body);
+    if (!root) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid json");
+    }
+
+    /* Fields left out of the request keep their current value. */
+    settings_t cfg = *settings_get();
+    json_get_str(root, "device_name", cfg.device_name, sizeof(cfg.device_name));
+    json_get_bool(root, "mqtt_enabled", &cfg.mqtt_enabled);
+    json_get_str(root, "mqtt_uri", cfg.mqtt_uri, sizeof(cfg.mqtt_uri));
+    json_get_str(root, "mqtt_user", cfg.mqtt_user, sizeof(cfg.mqtt_user));
+    json_get_str(root, "mqtt_pass", cfg.mqtt_pass, sizeof(cfg.mqtt_pass));
+    json_get_str(root, "mqtt_topic", cfg.mqtt_topic, sizeof(cfg.mqtt_topic));
+    json_get_bool(root, "mqtt_discovery", &cfg.mqtt_discovery);
+    json_get_str(root, "mqtt_ha_prefix", cfg.mqtt_ha_prefix, sizeof(cfg.mqtt_ha_prefix));
+    json_get_u16(root, "mqtt_interval_s", &cfg.mqtt_interval_s);
+    cJSON_Delete(root);
+
+    if (settings_save(&cfg) != ESP_OK) {
+        return httpd_resp_send_500(req);
+    }
+    mqtt_apply();
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "ok", true);
+    cJSON_AddStringToObject(resp, "mqtt_state", mqtt_state_str());
+    return send_json(req, resp);
+}
+
+/* While the portal runs, anything unknown is redirected so phones pop up the sign-in page. */static esp_err_t redirect_handler(httpd_req_t *req)
 {
     if (!(s_running & WIFI_PROV_SOFTAP)) {
         return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not found");
@@ -650,19 +739,21 @@ static esp_err_t http_start(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port      = WIFI_HTTP_PORT;
-    cfg.max_uri_handlers = 10;
+    cfg.max_uri_handlers = 12;
     cfg.lru_purge_enable = true;
     cfg.uri_match_fn     = httpd_uri_match_wildcard;
     ESP_RETURN_ON_ERROR(httpd_start(&s_httpd, &cfg), TAG, "httpd");
 
     /* Order matters: the wildcard entry must be registered last. */
     static const httpd_uri_t routes[] = {
-        { .uri = "/",            .method = HTTP_GET,  .handler = root_get_handler },
-        { .uri = "/api/live",    .method = HTTP_GET,  .handler = live_get_handler },
-        { .uri = "/api/scan",    .method = HTTP_GET,  .handler = scan_get_handler },
-        { .uri = "/api/status",  .method = HTTP_GET,  .handler = status_get_handler },
-        { .uri = "/api/connect", .method = HTTP_POST, .handler = connect_post_handler },
-        { .uri = "/*",           .method = HTTP_GET,  .handler = redirect_handler },
+        { .uri = "/",             .method = HTTP_GET,  .handler = root_get_handler },
+        { .uri = "/api/live",     .method = HTTP_GET,  .handler = live_get_handler },
+        { .uri = "/api/scan",     .method = HTTP_GET,  .handler = scan_get_handler },
+        { .uri = "/api/status",   .method = HTTP_GET,  .handler = status_get_handler },
+        { .uri = "/api/settings", .method = HTTP_GET,  .handler = settings_get_handler },
+        { .uri = "/api/settings", .method = HTTP_POST, .handler = settings_post_handler },
+        { .uri = "/api/connect",  .method = HTTP_POST, .handler = connect_post_handler },
+        { .uri = "/*",            .method = HTTP_GET,  .handler = redirect_handler },
     };
     for (int i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
         ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_httpd, &routes[i]), TAG, "route %s", routes[i].uri);

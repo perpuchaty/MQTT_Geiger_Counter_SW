@@ -1,6 +1,8 @@
 idf_component_register(SRCS "config.c"
                             "main.c"
                             "geiger.c"
+                            "settings.c"
+                            "mqtt.c"
                             "wifi_prov.c"
                             "blufi_init.c"
                             "blufi_security.c"

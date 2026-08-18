@@ -1,5 +1,12 @@
 menu "Geiger Counter"
 
+    config GEIGER_DEVICE_NAME
+        string "Device name"
+        default "Geiger Counter"
+        help
+            Shown in the web UI and used as the Home Assistant device name.
+            Can be changed at runtime, the value here is only the default.
+
     menu "Wi-Fi provisioning"
 
         config GEIGER_AP_SSID_PREFIX
@@ -61,6 +68,49 @@ menu "Geiger Counter"
             int "HTTP server port"
             range 1 65535
             default 80
+
+    endmenu
+
+    menu "MQTT / Home Assistant"
+
+        comment "Defaults only, every value can be changed from the web UI"
+
+        config GEIGER_MQTT_ENABLED
+            bool "Enable MQTT by default"
+            default n
+
+        config GEIGER_MQTT_URI
+            string "Broker URI"
+            default "mqtt://homeassistant.local:1883"
+            help
+                mqtt://host:port, mqtts://host:port or ws://host:port/path.
+
+        config GEIGER_MQTT_USER
+            string "Broker username"
+            default ""
+
+        config GEIGER_MQTT_PASS
+            string "Broker password"
+            default ""
+
+        config GEIGER_MQTT_TOPIC
+            string "Base topic"
+            default "geiger"
+            help
+                Topics are <base>/<device-id>/state and <base>/<device-id>/status.
+
+        config GEIGER_MQTT_HA_DISCOVERY
+            bool "Publish Home Assistant discovery"
+            default y
+
+        config GEIGER_MQTT_HA_PREFIX
+            string "Home Assistant discovery prefix"
+            default "homeassistant"
+
+        config GEIGER_MQTT_INTERVAL_S
+            int "State publish interval (s)"
+            range 1 3600
+            default 30
 
     endmenu
 

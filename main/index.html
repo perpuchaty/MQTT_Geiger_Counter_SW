@@ -35,7 +35,11 @@ input,button.wide{width:100%;padding:.7rem;margin-bottom:.7rem;border-radius:8px
 button.wide{background:#2f7dd1;border-color:#2f7dd1;font-weight:600;cursor:pointer}
 button.wide.alt{background:#171d23;border-color:#2a3138;font-weight:400}
 button.wide:disabled{opacity:.5;cursor:default}
-#msg{min-height:1.4rem;font-size:.9rem;color:#8a949e}
+label{display:block;color:#8a949e;font-size:.78rem;text-transform:uppercase;letter-spacing:.04em;margin-bottom:.25rem}
+label.row{display:flex;align-items:center;gap:.5rem;text-transform:none;font-size:.95rem;letter-spacing:0;
+  color:#e6e6e6;margin-bottom:.8rem}
+label.row input{width:auto;margin:0}
+#msg,#mqttmsg{min-height:1.4rem;font-size:.9rem;color:#8a949e}
 .soon{color:#8a949e;font-size:.9rem;line-height:1.5}
 .banner{display:none;align-items:center;justify-content:space-between;gap:.6rem;margin-bottom:1rem;
   padding:.6rem .8rem;border:1px solid #4a3a1a;background:#241d10;border-radius:10px;font-size:.9rem}
@@ -53,6 +57,7 @@ button.wide:disabled{opacity:.5;cursor:default}
 <nav>
   <button data-tab="live" class="on">Live</button>
   <button data-tab="wifi">Wi-Fi</button>
+  <button data-tab="mqtt">MQTT</button>
   <button data-tab="tube">Tube</button>
   <button data-tab="alarm">Alarm</button>
   <button data-tab="system">System</button>
@@ -82,10 +87,31 @@ button.wide:disabled{opacity:.5;cursor:default}
   <div id="msg"></div>
 </section>
 
+<section id="mqtt">
+  <div class="card" style="margin-bottom:1rem"><i>Broker status</i><b id="mqttstate" style="font-size:1rem">--</b></div>
+  <label class="row"><input type="checkbox" id="mq_en"> Publish to MQTT</label>
+  <label for="dev_name">Device name</label>
+  <input id="dev_name" placeholder="Geiger Counter" autocomplete="off">
+  <label for="mq_uri">Broker URI</label>
+  <input id="mq_uri" placeholder="mqtt://homeassistant.local:1883" autocomplete="off" autocapitalize="off">
+  <label for="mq_user">Username</label>
+  <input id="mq_user" placeholder="optional" autocomplete="off" autocapitalize="off">
+  <label for="mq_pass">Password</label>
+  <input id="mq_pass" type="password" placeholder="optional" autocomplete="new-password">
+  <label for="mq_topic">Base topic</label>
+  <input id="mq_topic" placeholder="geiger" autocomplete="off" autocapitalize="off">
+  <label class="row"><input type="checkbox" id="mq_disc"> Home Assistant discovery</label>
+  <label for="mq_pfx">Discovery prefix</label>
+  <input id="mq_pfx" placeholder="homeassistant" autocomplete="off" autocapitalize="off">
+  <label for="mq_int">Publish interval (s)</label>
+  <input id="mq_int" type="number" min="1" max="3600">
+  <button class="wide" id="mqttsave" type="button">Save</button>
+  <div id="mqttmsg"></div>
+</section>
+
 <section id="tube">
   <p class="soon">Tube settings (HV target, dead time, conversion factor) will live here.</p>
 </section>
-
 <section id="alarm">
   <p class="soon">Alarm thresholds and buzzer settings will live here.</p>
 </section>
@@ -194,13 +220,68 @@ $('rescan').onclick = scan;
 $('save').onclick = save;
 $('gowifi').onclick = () => { show('wifi'); if (!$('list').children.length) scan(); };
 
+/* ---- mqtt tab ---- */
+const mqttMsg = t => $('mqttmsg').textContent = t;
+let passStored = false;
+
+async function loadSettings(fill = true) {
+  try {
+    const s = await (await fetch('/api/settings')).json();
+    $('mqttstate').textContent = s.mqtt_state;
+    if (!fill) return;
+    $('dev_name').value = s.device_name;
+    $('mq_en').checked = s.mqtt_enabled;
+    $('mq_uri').value = s.mqtt_uri;
+    $('mq_user').value = s.mqtt_user;
+    $('mq_topic').value = s.mqtt_topic;
+    $('mq_disc').checked = s.mqtt_discovery;
+    $('mq_pfx').value = s.mqtt_ha_prefix;
+    $('mq_int').value = s.mqtt_interval_s;
+    passStored = s.mqtt_pass_set;
+    $('mq_pass').placeholder = passStored ? '\u2022\u2022\u2022\u2022 unchanged' : 'optional';
+  } catch (e) { mqttMsg('Could not load settings'); }
+}
+
+async function saveSettings() {
+  $('mqttsave').disabled = true;
+  mqttMsg('Saving\u2026');
+  const body = {
+    device_name: $('dev_name').value,
+    mqtt_enabled: $('mq_en').checked,
+    mqtt_uri: $('mq_uri').value,
+    mqtt_user: $('mq_user').value,
+    mqtt_topic: $('mq_topic').value,
+    mqtt_discovery: $('mq_disc').checked,
+    mqtt_ha_prefix: $('mq_pfx').value,
+    mqtt_interval_s: Number($('mq_int').value)
+  };
+  /* An empty box keeps the stored password, unless none was stored yet. */
+  if ($('mq_pass').value || !passStored) body.mqtt_pass = $('mq_pass').value;
+
+  try {
+    const r = await (await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    })).json();
+    $('mq_pass').value = '';
+    mqttMsg(r.ok ? 'Saved' : 'Save failed');
+    setTimeout(loadSettings, 2000);
+  } catch (e) { mqttMsg('Save failed'); }
+  $('mqttsave').disabled = false;
+}
+
+$('mqttsave').onclick = saveSettings;
+
 (async () => {
   await status();
+  await loadSettings();
   const tab = location.hash.slice(1);
   if (document.getElementById(tab)) show(tab);
   live();
   setInterval(live, 1000);
   setInterval(status, 10000);
+  setInterval(() => { if ($('mqtt').classList.contains('on')) loadSettings(false); }, 5000);
 })();
 </script>
 </body>
