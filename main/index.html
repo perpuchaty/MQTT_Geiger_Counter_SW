@@ -23,6 +23,10 @@ section.on{display:block}
 .dose span{color:#8a949e;font-size:.9rem}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:.6rem;margin-top:1rem}
 .card{background:#171d23;border:1px solid #2a3138;border-radius:10px;padding:.7rem .8rem}
+.chart{background:#171d23;border:1px solid #2a3138;border-radius:10px;padding:.6rem .5rem .35rem}
+.chart canvas{display:block;width:100%;height:130px}
+.chart .lbl{display:flex;justify-content:space-between;color:#8a949e;font-size:.72rem;padding:.35rem .3rem 0}
+.chart .lbl select{background:#101418;color:#c4ccd4;border:1px solid #2a3138;border-radius:6px;font-size:.72rem;padding:.1rem .2rem}
 .card i{display:block;color:#8a949e;font-size:.75rem;font-style:normal;text-transform:uppercase;letter-spacing:.04em}
 .card b{font-size:1.2rem;font-weight:600;font-variant-numeric:tabular-nums}
 ul{list-style:none;margin:0 0 .8rem;padding:0;border:1px solid #2a3138;border-radius:10px;overflow:hidden}
@@ -59,6 +63,7 @@ label output{float:right;color:#e6e6e6;font-variant-numeric:tabular-nums}
 <nav>
   <button data-tab="live" class="on">Live</button>
   <button data-tab="wifi">Wi-Fi</button>
+  <button data-tab="history">History</button>
   <button data-tab="mqtt">MQTT</button>
   <button data-tab="tube">Tube</button>
   <button data-tab="device">Device</button>
@@ -72,11 +77,40 @@ label output{float:right;color:#e6e6e6;font-variant-numeric:tabular-nums}
     <button type="button" id="gowifi">Set up Wi-Fi</button>
   </div>
   <div class="dose"><b id="usvh">--</b><span>&micro;Sv/h</span></div>
+  <div class="chart">
+    <canvas id="chart"></canvas>
+    <div class="lbl">
+      <span id="chartspan">Collecting history&hellip;</span>
+      <select id="livewin">
+        <option value="300">5 min</option>
+        <option value="900">15 min</option>
+        <option value="1800">30 min</option>
+        <option value="3600">1 hour</option>
+      </select>
+      <span id="chartmax"></span>
+    </div>
+  </div>
   <div class="grid">
     <div class="card"><i>CPM</i><b id="cpm">--</b></div>
     <div class="card"><i>Total counts</i><b id="total">--</b></div>
     <div class="card"><i>Tube HV</i><b id="hv">--</b></div>
     <div class="card"><i>Battery</i><b id="vbat">--</b></div>
+  </div>
+</section>
+
+<section id="history">
+  <label for="histwin">Time range</label>
+  <select id="histwin">
+    <option value="3600">Last 1 hour</option>
+    <option value="21600">Last 6 hours</option>
+    <option value="86400">Last 24 hours</option>
+    <option value="604800">Last 7 days</option>
+    <option value="1728000">Last 20 days</option>
+  </select>
+  <button class="wide alt" id="histrefresh" type="button">Refresh</button>
+  <div class="chart">
+    <canvas id="chart_hist"></canvas>
+    <div class="lbl"><span id="histspan">No data yet</span><span id="histmax"></span></div>
   </div>
 </section>
 
@@ -157,6 +191,8 @@ function show(name) {
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.tab === name));
   document.querySelectorAll('main section').forEach(s => s.classList.toggle('on', s.id === name));
   location.hash = name;
+  if (name === 'live') drawLiveChart();
+  if (name === 'history') drawHistChart();
 }
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => show(b.dataset.tab));
 
@@ -174,6 +210,104 @@ async function live() {
     $('uptime').textContent = new Date(d.uptime * 1000).toISOString().substr(11, 8);
   } catch (e) { /* transient while the radio switches channels */ }
 }
+
+/* ---- history chart ---- */
+let hist = { cpm: [], ts: [], window_s: 300, cpm_per_usvh: 153.8 };
+let histLong = { cpm: [], ts: [], window_s: 3600, cpm_per_usvh: 153.8 };
+
+function drawSeries(canvasId, spanId, maxId, data, windowS) {
+  const c = $(canvasId), dpr = window.devicePixelRatio || 1;
+  const w = c.clientWidth, h = c.clientHeight;
+  if (!w) return;
+  c.width = w * dpr;
+  c.height = h * dpr;
+  const g = c.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+
+  g.strokeStyle = '#2a3138';
+  g.lineWidth = 1;
+  for (let i = 0; i <= 3; i++) {
+    const y = Math.round(h * i / 3) + .5;
+    g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke();
+  }
+
+  const v = data;
+  if (v.length < 2) return;
+  const max = Math.max(10, ...v) * 1.15;
+  const px = i => i * w / (v.length - 1);
+  const py = n => h - (n / max) * (h - 2) - 1;
+
+  const fill = g.createLinearGradient(0, 0, 0, h);
+  fill.addColorStop(0, 'rgba(47,125,209,.45)');
+  fill.addColorStop(1, 'rgba(47,125,209,0)');
+  g.beginPath();
+  g.moveTo(0, h);
+  v.forEach((n, i) => g.lineTo(px(i), py(n)));
+  g.lineTo(w, h);
+  g.closePath();
+  g.fillStyle = fill;
+  g.fill();
+
+  g.beginPath();
+  v.forEach((n, i) => i ? g.lineTo(px(i), py(n)) : g.moveTo(0, py(n)));
+  g.strokeStyle = '#2f7dd1';
+  g.lineWidth = 2;
+  g.lineJoin = 'round';
+  g.stroke();
+
+  const mins = Math.round(windowS / 60);
+  $(spanId).textContent = mins >= 60 ? 'Last ' + (mins / 60) + ' h' : 'Last ' + mins + ' min';
+  $(maxId).textContent = 'peak ' + Math.max(...v) + ' CPM';
+}
+
+function drawLiveChart() {
+  drawSeries('chart', 'chartspan', 'chartmax', hist.cpm, hist.window_s);
+}
+
+function drawHistChart() {
+  drawSeries('chart_hist', 'histspan', 'histmax', histLong.cpm, histLong.window_s);
+}
+
+async function historyShort() {
+  const windowS = Number($('livewin').value) || 300;
+  try {
+    hist = await (await fetch('/api/history?window_s=' + windowS)).json();
+    drawLiveChart();
+  } catch (e) { /* transient */ }
+}
+
+async function historyLong() {
+  const windowS = Number($('histwin').value) || 3600;
+  try {
+    const text = await (await fetch('/api/history_csv')).text();
+    const now = Math.floor(Date.now() / 1000);
+    const since = now - windowS;
+    const cpm = [];
+    const ts = [];
+    text.split(/\r?\n/).forEach(line => {
+      const p = line.split(',');
+      if (p.length < 2) return;
+      const t = Number(p[0]);
+      const v = Number(p[1]);
+      if (!Number.isFinite(t) || !Number.isFinite(v) || t < since) return;
+      ts.push(t);
+      cpm.push(v);
+    });
+    const MAX_POINTS = 1200;
+    if (cpm.length > MAX_POINTS) {
+      const step = Math.ceil(cpm.length / MAX_POINTS);
+      histLong = { cpm: cpm.filter((_, i) => i % step === 0), ts: ts.filter((_, i) => i % step === 0), window_s: windowS, cpm_per_usvh: hist.cpm_per_usvh };
+    } else {
+      histLong = { cpm, ts, window_s: windowS, cpm_per_usvh: hist.cpm_per_usvh };
+    }
+    drawHistChart();
+  } catch (e) { /* transient */ }
+}
+window.addEventListener('resize', () => {
+  drawLiveChart();
+  drawHistChart();
+});
 
 async function status() {
   try {
@@ -274,6 +408,7 @@ async function loadSettings(fill = true) {
     $('lcd_dim').checked = s.lcd_auto_dim;
     $('led_en').checked = s.led_enabled;
     $('chg_en').checked = s.batt_charge_en;
+    $('livewin').value = String(s.history_short_window_s || 300);
     sliders();
   } catch (e) { mqttMsg('Could not load settings'); }
 }
@@ -333,13 +468,24 @@ $('devsave').onclick = () => post({
   batt_charge_en: $('chg_en').checked
 }, 'devsave', 'devmsg');
 
+$('livewin').onchange = async () => {
+  await post({ history_short_window_s: Number($('livewin').value) }, 'devsave', 'devmsg');
+  historyShort();
+};
+
+$('histrefresh').onclick = historyLong;
+$('histwin').onchange = historyLong;
+
 (async () => {
   await status();
   await loadSettings();
   const tab = location.hash.slice(1);
   if (document.getElementById(tab)) show(tab);
   live();
+  historyShort();
+  historyLong();
   setInterval(live, 1000);
+  setInterval(historyShort, 10000);
   setInterval(status, 10000);
   setInterval(() => { if ($('mqtt').classList.contains('on')) loadSettings(false); }, 5000);
 })();

@@ -15,6 +15,7 @@ typedef enum {
     T_BOOL,
     T_U8,
     T_U16,
+    T_U32,
     T_FLOAT,
     T_STR,
 } setting_type_t;
@@ -49,6 +50,7 @@ static const setting_desc_t s_desc[] = {
     S_FIELD("led_en",     T_BOOL,  led_enabled),
     S_FIELD("lcd_bri",    T_U8,    lcd_brightness),
     S_FIELD("lcd_dim",    T_BOOL,  lcd_auto_dim),
+    S_FIELD("hist_win",   T_U32,   history_short_window_s),
 };
 
 static settings_t s_cfg;
@@ -79,6 +81,7 @@ static void settings_defaults(settings_t *c)
     c->spk_volume     = CONFIG_GEIGER_SPK_VOLUME;
     c->spk_sound      = CONFIG_GEIGER_SPK_SOUND;
     c->lcd_brightness = CONFIG_GEIGER_LCD_BRIGHTNESS;
+    c->history_short_window_s = CONFIG_GEIGER_HISTORY_SHORT_WINDOW_S;
 #ifdef CONFIG_GEIGER_LCD_AUTO_DIM
     c->lcd_auto_dim = true;
 #endif
@@ -95,11 +98,19 @@ static uint16_t clamp_u16(uint16_t v, uint16_t lo, uint16_t hi)
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
+static uint32_t clamp_u32(uint32_t v, uint32_t lo, uint32_t hi)
+{
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
 static void settings_clamp(settings_t *c)
 {
     c->tube_window_s = clamp_u16(c->tube_window_s, TUBE_WINDOW_MIN_S, TUBE_WINDOW_MAX_S);
     c->tube_target_v = clamp_u16(c->tube_target_v, TUBE_TARGET_MIN_V, TUBE_TARGET_MAX_V);
     c->mqtt_interval_s = clamp_u16(c->mqtt_interval_s, 1, 3600);
+    c->history_short_window_s = clamp_u32(c->history_short_window_s,
+                                          HISTORY_SHORT_MIN_S,
+                                          HISTORY_SHORT_MAX_S);
 
     if (!(c->tube_cpm_per_usvh >= TUBE_CPM_MIN)) {
         c->tube_cpm_per_usvh = TUBE_CPM_MIN;   /* also catches NaN */
@@ -128,6 +139,9 @@ static void log_field(const char *action, const setting_desc_t *d, const void *f
         break;
     case T_U16:
         ESP_LOGI(TAG, "%s %-9s = %u", action, d->key, (unsigned)*(const uint16_t *)field);
+        break;
+    case T_U32:
+        ESP_LOGI(TAG, "%s %-9s = %lu", action, d->key, (unsigned long)*(const uint32_t *)field);
         break;
     case T_FLOAT: {
         /* printed as x.y, the log formatter has no float support with nano libc */
@@ -175,6 +189,9 @@ static int settings_load(nvs_handle_t nvs, settings_t *c)
         case T_U16:
             err = nvs_get_u16(nvs, d->key, (uint16_t *)field);
             break;
+        case T_U32:
+            err = nvs_get_u32(nvs, d->key, (uint32_t *)field);
+            break;
         case T_FLOAT: {
             uint32_t bits;
             err = nvs_get_u32(nvs, d->key, &bits);
@@ -215,6 +232,9 @@ static esp_err_t settings_store(nvs_handle_t nvs, const settings_t *c)
             break;
         case T_U16:
             err = nvs_set_u16(nvs, d->key, *(const uint16_t *)field);
+            break;
+        case T_U32:
+            err = nvs_set_u32(nvs, d->key, *(const uint32_t *)field);
             break;
         case T_FLOAT: {
             uint32_t bits;

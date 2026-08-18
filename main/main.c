@@ -3,6 +3,7 @@
 #include "config.h"
 #include "esp_log.h"
 #include "geiger.h"
+#include "history_store.h"
 #include "mqtt.h"
 #include "nvs_flash.h"
 #include "settings.h"
@@ -24,6 +25,7 @@ void app_main(void)
 {
     nvs_bringup();
     ESP_ERROR_CHECK(settings_init());   /* everything below reads settings_get() */
+    ESP_ERROR_CHECK(history_store_init());
 
     ESP_ERROR_CHECK(board_init());
     board_apply_settings();

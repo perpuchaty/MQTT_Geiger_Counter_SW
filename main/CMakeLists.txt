@@ -1,6 +1,7 @@
 idf_component_register(SRCS "config.c"
                             "main.c"
                             "geiger.c"
+                            "history_store.c"
                             "settings.c"
                             "mqtt.c"
                             "wifi_prov.c"
@@ -20,5 +21,6 @@ idf_component_register(SRCS "config.c"
                              nvs_flash
                              lwip
                              bt
+                             spiffs
                              app_update
                     PRIV_REQUIRES mbedtls)

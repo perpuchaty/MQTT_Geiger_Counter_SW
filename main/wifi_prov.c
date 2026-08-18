@@ -1,6 +1,9 @@
 #include "wifi_prov.h"
 
+#include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
+#include <time.h>
 
 #include "blufi_example.h"
 #include "cJSON.h"
@@ -17,12 +20,14 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "geiger.h"
+#include "history_store.h"
 #include "lwip/sockets.h"
 #include "mdns.h"
 #include "mqtt.h"
 #include "nvs_flash.h"
 #include "settings.h"
 #include "soc/soc_caps.h"
+#include "esp_sntp.h"
 
 static const char *TAG = "wifi";
 
@@ -37,8 +42,32 @@ static int                 s_dns_sock = -1;
 static wifi_prov_method_t  s_running;
 static char                s_ap_ssid[32];
 static esp_timer_handle_t  s_portal_timer;
+static bool                s_sntp_started;
 
 static void portal_stop(void);
+
+static void time_sync_cb(struct timeval *tv)
+{
+    time_t now = time(NULL);
+    struct tm t = {0};
+    localtime_r(&now, &t);
+    ESP_LOGI(TAG, "clock synced: %04d-%02d-%02d %02d:%02d:%02d",
+             t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
+             t.tm_hour, t.tm_min, t.tm_sec);
+}
+
+static void time_sync_start(void)
+{
+    if (s_sntp_started) {
+        return;
+    }
+    sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    sntp_setservername(0, "pool.ntp.org");
+    sntp_set_time_sync_notification_cb(time_sync_cb);
+    sntp_init();
+    s_sntp_started = true;
+    ESP_LOGI(TAG, "SNTP started");
+}
 
 /* Station state, also reported back over BluFi. */
 static bool     s_sta_connected;
@@ -149,6 +178,7 @@ static void ip_event_handler(void *arg, esp_event_base_t base, int32_t id, void 
     s_sta_got_ip = true;
     ESP_LOGI(TAG, "got ip " IPSTR ", web ui on http://" WIFI_MDNS_HOSTNAME ".local",
              IP2STR(&((ip_event_got_ip_t *)data)->ip_info.ip));
+    time_sync_start();
 
     /* Give the portal client a moment to follow the redirect, then drop the SoftAP. */
     if (WIFI_PORTAL_LINGER_MS > 0 && (s_running & WIFI_PROV_SOFTAP) && s_portal_timer &&
@@ -414,6 +444,78 @@ static esp_err_t live_get_handler(httpd_req_t *req)
     return send_json(req, root);
 }
 
+static esp_err_t history_get_handler(httpd_req_t *req)
+{
+    uint32_t window_s = settings_get()->history_short_window_s;
+    char query[80];
+    if (httpd_req_get_url_query_len(req) > 0 &&
+        httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        char val[16];
+        if (httpd_query_key_value(query, "window_s", val, sizeof(val)) == ESP_OK) {
+            uint32_t parsed = (uint32_t)strtoul(val, NULL, 10);
+            if (parsed >= HISTORY_SHORT_MIN_S && parsed <= HISTORY_SHORT_MAX_S) {
+                window_s = parsed;
+            }
+        }
+    }
+
+    uint32_t now_s = (uint32_t)time(NULL);
+    uint32_t since = (now_s > window_s) ? (now_s - window_s) : 0;
+
+    history_point_t *points = calloc(720, sizeof(history_point_t));
+    if (!points) {
+        return httpd_resp_send_500(req);
+    }
+    size_t n = 0;
+    uint32_t oldest = 0;
+    uint32_t newest = 0;
+    esp_err_t hist_err = history_store_query(since, points, 720, &n, &oldest, &newest);
+    if (hist_err != ESP_OK) {
+        free(points);
+        ESP_LOGE(TAG, "history read failed: %s", esp_err_to_name(hist_err));
+        return httpd_resp_send_500(req);
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "window_s", window_s);
+    cJSON_AddNumberToObject(root, "now", now_s);
+    cJSON_AddNumberToObject(root, "oldest", oldest);
+    cJSON_AddNumberToObject(root, "newest", newest);
+    cJSON_AddNumberToObject(root, "cpm_per_usvh", settings_get()->tube_cpm_per_usvh);
+
+    cJSON *arr = cJSON_AddArrayToObject(root, "cpm");
+    cJSON *ts_arr = cJSON_AddArrayToObject(root, "ts");
+    for (size_t i = 0; i < n; i++) {
+        cJSON_AddItemToArray(arr, cJSON_CreateNumber(points[i].cpm));
+        cJSON_AddItemToArray(ts_arr, cJSON_CreateNumber(points[i].ts));
+    }
+    esp_err_t resp = send_json(req, root);
+    free(points);
+    return resp;
+}
+
+static esp_err_t history_csv_get_handler(httpd_req_t *req)
+{
+    FILE *f = fopen(HISTORY_STORE_FILE_PATH, "r");
+    if (!f) {
+        httpd_resp_set_type(req, "text/plain");
+        return httpd_resp_sendstr(req, "");
+    }
+
+    httpd_resp_set_type(req, "text/csv");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+
+    char chunk[512];
+    while (fgets(chunk, sizeof(chunk), f)) {
+        if (httpd_resp_send_chunk(req, chunk, HTTPD_RESP_USE_STRLEN) != ESP_OK) {
+            fclose(f);
+            return ESP_FAIL;
+        }
+    }
+    fclose(f);
+    return httpd_resp_send_chunk(req, NULL, 0);
+}
+
 static esp_err_t scan_get_handler(httpd_req_t *req)
 {
     wifi_scan_config_t scan = { .show_hidden = false };
@@ -523,6 +625,14 @@ static void json_get_u16(const cJSON *root, const char *key, uint16_t *dst)
     }
 }
 
+static void json_get_u32(const cJSON *root, const char *key, uint32_t *dst)
+{
+    const cJSON *item = cJSON_GetObjectItem(root, key);
+    if (cJSON_IsNumber(item) && item->valuedouble >= 0 && item->valuedouble <= UINT32_MAX) {
+        *dst = (uint32_t)item->valuedouble;
+    }
+}
+
 static void json_get_u8(const cJSON *root, const char *key, uint8_t *dst)
 {
     const cJSON *item = cJSON_GetObjectItem(root, key);
@@ -564,6 +674,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     cJSON_AddBoolToObject(root, "led_enabled", cfg->led_enabled);
     cJSON_AddNumberToObject(root, "lcd_brightness", cfg->lcd_brightness);
     cJSON_AddBoolToObject(root, "lcd_auto_dim", cfg->lcd_auto_dim);
+    cJSON_AddNumberToObject(root, "history_short_window_s", cfg->history_short_window_s);
     return send_json(req, root);
 }
 
@@ -604,6 +715,7 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
     json_get_bool(root, "led_enabled", &cfg.led_enabled);
     json_get_u8(root, "lcd_brightness", &cfg.lcd_brightness);
     json_get_bool(root, "lcd_auto_dim", &cfg.lcd_auto_dim);
+    json_get_u32(root, "history_short_window_s", &cfg.history_short_window_s);
     cJSON_Delete(root);
 
     if (settings_save(&cfg) != ESP_OK) {
@@ -618,7 +730,8 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
     return send_json(req, resp);
 }
 
-/* While the portal runs, anything unknown is redirected so phones pop up the sign-in page. */static esp_err_t redirect_handler(httpd_req_t *req)
+/* While the portal runs, anything unknown is redirected so phones pop up the sign-in page. */
+static esp_err_t redirect_handler(httpd_req_t *req)
 {
     if (!(s_running & WIFI_PROV_SOFTAP)) {
         return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not found");
@@ -775,6 +888,7 @@ static esp_err_t http_start(void)
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port      = WIFI_HTTP_PORT;
     cfg.max_uri_handlers = 12;
+    cfg.stack_size       = 8192;
     cfg.lru_purge_enable = true;
     cfg.uri_match_fn     = httpd_uri_match_wildcard;
     ESP_RETURN_ON_ERROR(httpd_start(&s_httpd, &cfg), TAG, "httpd");
@@ -783,6 +897,8 @@ static esp_err_t http_start(void)
     static const httpd_uri_t routes[] = {
         { .uri = "/",             .method = HTTP_GET,  .handler = root_get_handler },
         { .uri = "/api/live",     .method = HTTP_GET,  .handler = live_get_handler },
+        { .uri = "/api/history",  .method = HTTP_GET,  .handler = history_get_handler },
+        { .uri = "/api/history_csv", .method = HTTP_GET, .handler = history_csv_get_handler },
         { .uri = "/api/scan",     .method = HTTP_GET,  .handler = scan_get_handler },
         { .uri = "/api/status",   .method = HTTP_GET,  .handler = status_get_handler },
         { .uri = "/api/settings", .method = HTTP_GET,  .handler = settings_get_handler },

@@ -69,6 +69,11 @@ menu "Geiger Counter"
             range 1 65535
             default 80
 
+        config GEIGER_HISTORY_SHORT_WINDOW_S
+            int "Live tab history span (s)"
+            range 60 1728000
+            default 300
+
     endmenu
 
     menu "MQTT / Home Assistant"

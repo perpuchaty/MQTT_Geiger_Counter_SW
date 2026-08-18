@@ -27,6 +27,8 @@ extern "C" {
 #define TUBE_TARGET_MAX_V   600
 #define TUBE_CPM_MIN        1.0f
 #define TUBE_CPM_MAX        10000.0f
+#define HISTORY_SHORT_MIN_S 60
+#define HISTORY_SHORT_MAX_S 1728000
 
 /** Click length emitted by the speaker on every tube pulse. */
 typedef enum {
@@ -66,6 +68,9 @@ typedef struct {
     bool     led_enabled;
     uint8_t  lcd_brightness;     /* 0-100 */
     bool     lcd_auto_dim;       /* dim the backlight when no button is pressed */
+
+    /* Web UI history preview on the Live tab */
+    uint32_t history_short_window_s;
 } settings_t;
 
 /** Loads NVS contents over the compiled-in defaults. Call once, after nvs_flash_init(). */
