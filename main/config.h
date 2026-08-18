@@ -17,14 +17,14 @@ extern "C" {
 /* -------------------------------------------------------------------------
  * Pinout
  * ---------------------------------------------------------------------- */
-#define PIN_LATCH GPIO_NUM_0 //output
+#define PIN_LATCH GPIO_NUM_48//GPIO_NUM_0 //output
 #define PIN_CHARGE_EN GPIO_NUM_1 //output
 #define PIN_CHRG GPIO_NUM_2 //input
 #define PIN_STBY GPIO_NUM_3 //input
 #define PIN_ADC_VLATCH GPIO_NUM_4 //input ADC
 #define PIN_PWM_TUBE GPIO_NUM_5 //output PWM
 #define PIN_ADC_TUBE GPIO_NUM_6 //input ADC
-#define PIN_TUBE_CNT GPIO_NUM_7 //input pulse counter 
+#define PIN_TUBE_CNT GPIO_NUM_0 //input pulse counter 
 #define PIN_VTUBE_OK GPIO_NUM_8 //input
 #define PIN_LED GPIO_NUM_9  //output
 #define PIN_PWM_LCD GPIO_NUM_14 //output PWM
@@ -35,8 +35,8 @@ extern "C" {
 #define PIN_LCD_CS GPIO_NUM_19  //output lcd ST7565P
 #define PIN_LCD_RESET GPIO_NUM_20//output lcd ST7565P
 #define PIN_LCD_A0 GPIO_NUM_21//output lcd ST7565P
-#define PIN_LCD_DATA0 GPIO_NUM_22//output lcd ST7565P
-#define PIN_LCD_CLOCK GPIO_NUM_23//output lcd ST7565P
+#define PIN_LCD_DATA0 GPIO_NUM_48//GPIO_NUM_22//output lcd ST7565P
+#define PIN_LCD_CLOCK GPIO_NUM_48//GPIO_NUM_23//output lcd ST7565P
 
 /* -------------------------------------------------------------------------
  * LCD - ST7565P over hardware SPI (u8g2, full framebuffer mode)
@@ -134,7 +134,7 @@ esp_err_t board_buzzer_off(void);
 esp_err_t board_adc_get_raw(board_adc_ch_t ch, int *raw);
 esp_err_t board_adc_get_mv(board_adc_ch_t ch, int *mv);
 
-/* LCD */
+/* LCD, NULL when the display pins are set to -1 */
 u8g2_t *board_lcd(void);
 
 #ifdef __cplusplus

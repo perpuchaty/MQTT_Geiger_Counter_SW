@@ -4,6 +4,7 @@
 
 #include "blufi_example.h"
 #include "cJSON.h"
+#include "config.h"
 #include "esp_blufi.h"
 #include "esp_blufi_api.h"
 #include "esp_check.h"
@@ -11,10 +12,13 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "geiger.h"
 #include "lwip/sockets.h"
+#include "mdns.h"
 #include "nvs_flash.h"
 #include "soc/soc_caps.h"
 
@@ -30,6 +34,9 @@ static httpd_handle_t      s_httpd;
 static int                 s_dns_sock = -1;
 static wifi_prov_method_t  s_running;
 static char                s_ap_ssid[32];
+static esp_timer_handle_t  s_portal_timer;
+
+static void portal_stop(void);
 
 /* Station state, also reported back over BluFi. */
 static bool     s_sta_connected;
@@ -42,8 +49,8 @@ static uint8_t  s_sta_ssid[32];
 static int      s_sta_ssid_len;
 static esp_blufi_extra_info_t s_conn_info;
 
-extern const char portal_html_start[] asm("_binary_portal_html_start");
-extern const char portal_html_end[]   asm("_binary_portal_html_end");
+extern const char index_html_start[] asm("_binary_index_html_start");
+extern const char index_html_end[]   asm("_binary_index_html_end");
 
 /* =========================================================================
  * Station handling
@@ -138,7 +145,14 @@ static void ip_event_handler(void *arg, esp_event_base_t base, int32_t id, void 
         return;
     }
     s_sta_got_ip = true;
-    ESP_LOGI(TAG, "got ip " IPSTR, IP2STR(&((ip_event_got_ip_t *)data)->ip_info.ip));
+    ESP_LOGI(TAG, "got ip " IPSTR ", web ui on http://" WIFI_MDNS_HOSTNAME ".local",
+             IP2STR(&((ip_event_got_ip_t *)data)->ip_info.ip));
+
+    /* Give the portal client a moment to follow the redirect, then drop the SoftAP. */
+    if (WIFI_PORTAL_LINGER_MS > 0 && (s_running & WIFI_PROV_SOFTAP) && s_portal_timer &&
+        !esp_timer_is_active(s_portal_timer)) {
+        esp_timer_start_once(s_portal_timer, (uint64_t)WIFI_PORTAL_LINGER_MS * 1000);
+    }
 
     if (s_ble_connected) {
         wifi_mode_t mode;
@@ -357,7 +371,7 @@ static void blufi_stop(void)
 }
 
 /* =========================================================================
- * SoftAP captive portal
+ * Web UI: landing page + JSON API, served on both the SoftAP and the station
  * ====================================================================== */
 
 static esp_err_t send_json(httpd_req_t *req, cJSON *root)
@@ -368,6 +382,7 @@ static esp_err_t send_json(httpd_req_t *req, cJSON *root)
         return httpd_resp_send_500(req);
     }
     httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     esp_err_t err = httpd_resp_sendstr(req, body);
     cJSON_free(body);
     return err;
@@ -376,7 +391,25 @@ static esp_err_t send_json(httpd_req_t *req, cJSON *root)
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
-    return httpd_resp_send(req, portal_html_start, portal_html_end - portal_html_start - 1);
+    return httpd_resp_send(req, index_html_start, index_html_end - index_html_start - 1);
+}
+
+static esp_err_t live_get_handler(httpd_req_t *req)
+{
+    int hv_mv = 0;
+    int vbat_mv = 0;
+    board_adc_get_mv(BOARD_ADC_TUBE, &hv_mv);
+    board_adc_get_mv(BOARD_ADC_VLATCH, &vbat_mv);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "cpm", geiger_cpm());
+    cJSON_AddNumberToObject(root, "usvh", geiger_usvh());
+    cJSON_AddNumberToObject(root, "total", geiger_total());
+    cJSON_AddNumberToObject(root, "hv_mv", hv_mv);
+    cJSON_AddNumberToObject(root, "vbat_mv", vbat_mv);
+    cJSON_AddBoolToObject(root, "hv_ok", board_input_level(BOARD_IN_VTUBE_OK));
+    cJSON_AddNumberToObject(root, "uptime", esp_timer_get_time() / 1000000);
+    return send_json(req, root);
 }
 
 static esp_err_t scan_get_handler(httpd_req_t *req)
@@ -414,7 +447,9 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     cJSON *root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "connected", s_sta_got_ip);
     cJSON_AddBoolToObject(root, "connecting", s_sta_connecting);
+    cJSON_AddBoolToObject(root, "portal", (s_running & WIFI_PROV_SOFTAP) != 0);
     cJSON_AddStringToObject(root, "ip", ip);
+    cJSON_AddStringToObject(root, "hostname", WIFI_MDNS_HOSTNAME);
     cJSON_AddStringToObject(root, "ssid", (const char *)s_sta_ssid);
     return send_json(req, root);
 }
@@ -458,9 +493,12 @@ static esp_err_t connect_post_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
 
-/* Anything else is redirected so phones pop up the captive portal sign-in page. */
+/* While the portal runs, anything unknown is redirected so phones pop up the sign-in page. */
 static esp_err_t redirect_handler(httpd_req_t *req)
 {
+    if (!(s_running & WIFI_PROV_SOFTAP)) {
+        return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not found");
+    }
     httpd_resp_set_status(req, "302 Found");
     httpd_resp_set_hdr(req, "Location", "http://" WIFI_AP_IP "/");
     return httpd_resp_send(req, NULL, 0);
@@ -608,6 +646,50 @@ static void dns_stop(void)
     }
 }
 
+static esp_err_t http_start(void)
+{
+    httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
+    cfg.server_port      = WIFI_HTTP_PORT;
+    cfg.max_uri_handlers = 10;
+    cfg.lru_purge_enable = true;
+    cfg.uri_match_fn     = httpd_uri_match_wildcard;
+    ESP_RETURN_ON_ERROR(httpd_start(&s_httpd, &cfg), TAG, "httpd");
+
+    /* Order matters: the wildcard entry must be registered last. */
+    static const httpd_uri_t routes[] = {
+        { .uri = "/",            .method = HTTP_GET,  .handler = root_get_handler },
+        { .uri = "/api/live",    .method = HTTP_GET,  .handler = live_get_handler },
+        { .uri = "/api/scan",    .method = HTTP_GET,  .handler = scan_get_handler },
+        { .uri = "/api/status",  .method = HTTP_GET,  .handler = status_get_handler },
+        { .uri = "/api/connect", .method = HTTP_POST, .handler = connect_post_handler },
+        { .uri = "/*",           .method = HTTP_GET,  .handler = redirect_handler },
+    };
+    for (int i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
+        ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_httpd, &routes[i]), TAG, "route %s", routes[i].uri);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t mdns_start(void)
+{
+    ESP_RETURN_ON_ERROR(mdns_init(), TAG, "mdns init");
+    ESP_RETURN_ON_ERROR(mdns_hostname_set(WIFI_MDNS_HOSTNAME), TAG, "mdns hostname");
+    ESP_RETURN_ON_ERROR(mdns_instance_name_set(WIFI_MDNS_INSTANCE), TAG, "mdns instance");
+
+    mdns_txt_item_t txt[] = { { "path", "/" } };
+    ESP_RETURN_ON_ERROR(mdns_service_add(NULL, "_http", "_tcp", WIFI_HTTP_PORT, txt, 1), TAG, "mdns service");
+    return ESP_OK;
+}
+
+static void portal_linger_cb(void *arg)
+{
+    if (s_running & WIFI_PROV_SOFTAP) {
+        ESP_LOGI(TAG, "station is up, closing the captive portal");
+        portal_stop();
+        s_running &= ~WIFI_PROV_SOFTAP;
+    }
+}
+
 static esp_err_t portal_start(void)
 {
     wifi_config_t ap = {
@@ -631,24 +713,6 @@ static esp_err_t portal_start(void)
     esp_netif_dhcps_option(s_ap_netif, ESP_NETIF_OP_SET, ESP_NETIF_CAPTIVEPORTAL_URI, uri, sizeof(uri));
     esp_netif_dhcps_start(s_ap_netif);
 
-    httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 8;
-    cfg.lru_purge_enable = true;
-    cfg.uri_match_fn     = httpd_uri_match_wildcard;
-    ESP_RETURN_ON_ERROR(httpd_start(&s_httpd, &cfg), TAG, "httpd");
-
-    /* Order matters: the wildcard entry must be registered last. */
-    static const httpd_uri_t routes[] = {
-        { .uri = "/",        .method = HTTP_GET,  .handler = root_get_handler },
-        { .uri = "/scan",    .method = HTTP_GET,  .handler = scan_get_handler },
-        { .uri = "/status",  .method = HTTP_GET,  .handler = status_get_handler },
-        { .uri = "/connect", .method = HTTP_POST, .handler = connect_post_handler },
-        { .uri = "/*",       .method = HTTP_GET,  .handler = redirect_handler },
-    };
-    for (int i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
-        ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_httpd, &routes[i]), TAG, "route %s", routes[i].uri);
-    }
-
     ESP_RETURN_ON_ERROR(dns_start(), TAG, "dns");
 
     ESP_LOGI(TAG, "portal up: connect to \"%s\" then open http://%s", s_ap_ssid, WIFI_AP_IP);
@@ -658,10 +722,6 @@ static esp_err_t portal_start(void)
 static void portal_stop(void)
 {
     dns_stop();
-    if (s_httpd) {
-        httpd_stop(s_httpd);
-        s_httpd = NULL;
-    }
     esp_wifi_set_mode(WIFI_MODE_STA);
 }
 
@@ -684,6 +744,7 @@ esp_err_t wifi_prov_init(void)
     s_sta_netif = esp_netif_create_default_wifi_sta();
     s_ap_netif  = esp_netif_create_default_wifi_ap();
     ESP_RETURN_ON_FALSE(s_sta_netif && s_ap_netif, ESP_FAIL, TAG, "netif create");
+    esp_netif_set_hostname(s_sta_netif, WIFI_MDNS_HOSTNAME);
 
     ESP_RETURN_ON_ERROR(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL),
                         TAG, "wifi events");
@@ -700,7 +761,16 @@ esp_err_t wifi_prov_init(void)
     snprintf(s_ap_ssid, sizeof(s_ap_ssid), "%s-%02X%02X%02X", WIFI_AP_SSID_PREFIX, mac[3], mac[4], mac[5]);
 
     record_conn_info(INVALID_RSSI, INVALID_REASON);
-    return esp_wifi_start();
+    ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "wifi start");
+
+    ESP_RETURN_ON_ERROR(mdns_start(), TAG, "mdns start");
+    ESP_RETURN_ON_ERROR(http_start(), TAG, "http start");
+
+    const esp_timer_create_args_t timer = { .callback = portal_linger_cb, .name = "portal" };
+    ESP_RETURN_ON_ERROR(esp_timer_create(&timer, &s_portal_timer), TAG, "portal timer");
+
+    ESP_LOGI(TAG, "web ui on http://" WIFI_MDNS_HOSTNAME ".local");
+    return ESP_OK;
 }
 
 esp_err_t wifi_prov_start(wifi_prov_method_t methods)

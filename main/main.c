@@ -2,6 +2,7 @@
 
 #include "config.h"
 #include "esp_log.h"
+#include "geiger.h"
 #include "wifi_prov.h"
 
 static const char *TAG = "app";
@@ -9,6 +10,7 @@ static const char *TAG = "app";
 void app_main(void)
 {
     ESP_ERROR_CHECK(board_init());
+    ESP_ERROR_CHECK(geiger_start());
     ESP_ERROR_CHECK(wifi_prov_init());
 
     if (!wifi_has_credentials()) {

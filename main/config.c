@@ -63,13 +63,13 @@ static esp_err_t gpio_init(void)
         .mode         = GPIO_MODE_OUTPUT,
         .intr_type    = GPIO_INTR_DISABLE,
     };
-    ESP_RETURN_ON_ERROR(gpio_config(&out), TAG, "output config failed");
+        ESP_RETURN_ON_ERROR(gpio_config(&out), TAG, "output config failed");
 
     gpio_set_level(PIN_LATCH, 0);
     gpio_set_level(PIN_CHARGE_EN, 0);
     gpio_set_level(PIN_LED, 0);
-    gpio_set_level(PIN_LCD_RESET, 0);
-    gpio_set_level(PIN_LCD_A0, 0);
+        gpio_set_level(PIN_LCD_RESET, 0);
+        gpio_set_level(PIN_LCD_A0, 0);
 
     for (int i = 0; i < BOARD_IN_COUNT; i++) {
         gpio_config_t in = {
@@ -382,7 +382,7 @@ static uint8_t u8x8_byte_esp_spi(u8x8_t *u8x8, uint8_t msg, uint8_t arg_int, voi
     }
     case U8X8_MSG_BYTE_SET_DC:
         lcd_flush();  /* A0 may only change between transfers */
-        gpio_set_level(PIN_LCD_A0, arg_int);
+            gpio_set_level(PIN_LCD_A0, arg_int);
         break;
     case U8X8_MSG_BYTE_END_TRANSFER:
         lcd_flush();
@@ -411,10 +411,10 @@ static uint8_t u8x8_gpio_and_delay_esp(u8x8_t *u8x8, uint8_t msg, uint8_t arg_in
         esp_rom_delay_us(1);
         break;
     case U8X8_MSG_GPIO_RESET:
-        gpio_set_level(PIN_LCD_RESET, arg_int);
+            gpio_set_level(PIN_LCD_RESET, arg_int);
         break;
     case U8X8_MSG_GPIO_DC:
-        gpio_set_level(PIN_LCD_A0, arg_int);
+            gpio_set_level(PIN_LCD_A0, arg_int);
         break;
     case U8X8_MSG_GPIO_CS:
         break;  /* driven by the SPI peripheral */

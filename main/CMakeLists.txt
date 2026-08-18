@@ -1,10 +1,11 @@
 idf_component_register(SRCS "config.c"
                             "main.c"
+                            "geiger.c"
                             "wifi_prov.c"
                             "blufi_init.c"
                             "blufi_security.c"
                     INCLUDE_DIRS "."
-                    EMBED_TXTFILES "portal.html"
+                    EMBED_TXTFILES "index.html"
                     REQUIRES esp_adc
                              esp_driver_gpio
                              esp_driver_spi

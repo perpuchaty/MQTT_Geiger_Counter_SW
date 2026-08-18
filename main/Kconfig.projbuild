@@ -1,0 +1,67 @@
+menu "Geiger Counter"
+
+    menu "Wi-Fi provisioning"
+
+        config GEIGER_AP_SSID_PREFIX
+            string "SoftAP SSID prefix"
+            default "esp32"
+            help
+                The advertised SSID is this prefix followed by the last three
+                bytes of the station MAC address.
+
+        config GEIGER_AP_PASSWORD
+            string "SoftAP password"
+            default ""
+            help
+                At least 8 characters to enable WPA2, or empty for an open network.
+
+        config GEIGER_AP_CHANNEL
+            int "SoftAP channel"
+            range 1 13
+            default 1
+
+        config GEIGER_AP_MAX_CONN
+            int "SoftAP maximum connections"
+            range 1 10
+            default 4
+
+        config GEIGER_AP_IP
+            string "SoftAP IPv4 address"
+            default "192.168.4.1"
+            help
+                Address the captive portal redirects to. Must match the DHCP
+                server configured for the AP netif.
+
+        config GEIGER_STA_MAX_RETRY
+            int "Station connection retries"
+            range 1 20
+            default 5
+
+        config GEIGER_PORTAL_LINGER_MS
+            int "SoftAP linger time after the station connects (ms)"
+            default 60000
+            help
+                Set to 0 to keep the SoftAP running forever.
+
+    endmenu
+
+    menu "Web UI"
+
+        config GEIGER_MDNS_HOSTNAME
+            string "mDNS hostname"
+            default "geigercounter"
+            help
+                The device is reachable as <hostname>.local.
+
+        config GEIGER_MDNS_INSTANCE
+            string "mDNS instance name"
+            default "Geiger Counter"
+
+        config GEIGER_HTTP_PORT
+            int "HTTP server port"
+            range 1 65535
+            default 80
+
+    endmenu
+
+endmenu
