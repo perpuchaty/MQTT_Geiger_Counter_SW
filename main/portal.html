@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Geiger Counter Wi-Fi</title>
+<style>
+:root{color-scheme:dark}
+body{margin:0;padding:1.2rem;font:16px system-ui,sans-serif;background:#101418;color:#e6e6e6}
+h1{font-size:1.2rem;margin:0 0 1rem}
+ul{list-style:none;margin:0 0 1rem;padding:0;border:1px solid #2a3138;border-radius:8px;overflow:hidden}
+li{display:flex;justify-content:space-between;gap:.5rem;padding:.7rem .8rem;cursor:pointer;border-top:1px solid #2a3138}
+li:first-child{border-top:none}
+li:hover,li.sel{background:#1c242c}
+.meta{color:#8a949e;font-size:.85rem;white-space:nowrap}
+input,button{width:100%;box-sizing:border-box;padding:.7rem;margin-bottom:.7rem;border-radius:8px;border:1px solid #2a3138;background:#171d23;color:#e6e6e6;font-size:1rem}
+button{background:#2f7dd1;border-color:#2f7dd1;font-weight:600;cursor:pointer}
+button:disabled{opacity:.5;cursor:default}
+#msg{min-height:1.4rem;font-size:.9rem;color:#8a949e}
+</style>
+</head>
+<body>
+<h1>Geiger Counter &ndash; Wi-Fi setup</h1>
+<button id="rescan" type="button">Scan networks</button>
+<ul id="list"></ul>
+<input id="ssid" placeholder="Network name" autocomplete="off" autocapitalize="off">
+<input id="pass" type="password" placeholder="Password" autocomplete="off">
+<button id="save" type="button">Connect</button>
+<div id="msg"></div>
+<script>
+const $ = id => document.getElementById(id);
+const msg = t => $('msg').textContent = t;
+
+async function scan() {
+  $('rescan').disabled = true;
+  msg('Scanning\u2026');
+  try {
+    const aps = await (await fetch('/scan')).json();
+    aps.sort((a, b) => b.rssi - a.rssi);
+    $('list').innerHTML = '';
+    for (const ap of aps) {
+      const li = document.createElement('li');
+      const name = document.createElement('span');
+      name.textContent = ap.ssid;
+      const meta = document.createElement('span');
+      meta.className = 'meta';
+      meta.textContent = (ap.lock ? '\u{1F512} ' : '') + ap.rssi + ' dBm';
+      li.append(name, meta);
+      li.onclick = () => {
+        document.querySelectorAll('#list li').forEach(e => e.classList.remove('sel'));
+        li.classList.add('sel');
+        $('ssid').value = ap.ssid;
+        $('pass').focus();
+      };
+      $('list').append(li);
+    }
+    msg(aps.length ? 'Pick a network' : 'No networks found');
+  } catch (e) {
+    msg('Scan failed');
+  }
+  $('rescan').disabled = false;
+}
+
+async function save() {
+  if (!$('ssid').value) { msg('Enter a network name'); return; }
+  $('save').disabled = true;
+  msg('Connecting\u2026');
+  await fetch('/connect', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ssid: $('ssid').value, password: $('pass').value })
+  });
+  for (let i = 0; i < 20; i++) {
+    await new Promise(r => setTimeout(r, 1000));
+    try {
+      const s = await (await fetch('/status')).json();
+      if (s.connected) { msg('Connected, IP ' + s.ip); $('save').disabled = false; return; }
+    } catch (e) { /* AP link drops briefly while the STA associates */ }
+  }
+  msg('Could not connect, check the password');
+  $('save').disabled = false;
+}
+
+$('rescan').onclick = scan;
+$('save').onclick = save;
+scan();
+</script>
+</body>
+</html>
