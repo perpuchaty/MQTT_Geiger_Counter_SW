@@ -138,6 +138,12 @@ esp_err_t history_store_init(void)
     return ESP_OK;
 }
 
+esp_err_t history_store_format(void)
+{
+    ESP_RETURN_ON_FALSE(s_ready, ESP_ERR_INVALID_STATE, TAG, "spiffs not mounted");
+    return esp_spiffs_format(NULL);
+}
+
 esp_err_t history_store_append(uint32_t ts, uint16_t cpm)
 {
     if (!s_ready) {

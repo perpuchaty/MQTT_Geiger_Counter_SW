@@ -121,6 +121,11 @@ uint32_t board_tube_pulses(void)
     return s_tube_pulses;
 }
 
+void board_simulate_tube_pulse(void)
+{
+    s_tube_pulses++;
+}
+
 /* =========================================================================
  * PWM (LEDC)
  * ====================================================================== */

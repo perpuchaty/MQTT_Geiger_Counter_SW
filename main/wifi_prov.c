@@ -15,6 +15,7 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -730,6 +731,37 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
     return send_json(req, resp);
 }
 
+static void restart_cb(void *arg)
+{
+    esp_restart();
+}
+
+static esp_err_t restart_post_handler(httpd_req_t *req)
+{
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "ok", true);
+    ESP_RETURN_ON_ERROR(send_json(req, resp), TAG, "restart response");
+
+    esp_timer_handle_t timer;
+    esp_timer_create_args_t args = {
+        .callback = restart_cb,
+        .name = "restart",
+    };
+    ESP_RETURN_ON_ERROR(esp_timer_create(&args, &timer), TAG, "restart timer");
+    return esp_timer_start_once(timer, 250000);
+}
+
+static esp_err_t factory_reset_post_handler(httpd_req_t *req)
+{
+    if (history_store_format() != ESP_OK) {
+        return httpd_resp_send_500(req);
+    }
+    if (nvs_flash_erase() != ESP_OK) {
+        return httpd_resp_send_500(req);
+    }
+    return restart_post_handler(req);
+}
+
 /* While the portal runs, anything unknown is redirected so phones pop up the sign-in page. */
 static esp_err_t redirect_handler(httpd_req_t *req)
 {
@@ -904,6 +936,8 @@ static esp_err_t http_start(void)
         { .uri = "/api/settings", .method = HTTP_GET,  .handler = settings_get_handler },
         { .uri = "/api/settings", .method = HTTP_POST, .handler = settings_post_handler },
         { .uri = "/api/connect",  .method = HTTP_POST, .handler = connect_post_handler },
+        { .uri = "/api/restart",  .method = HTTP_POST, .handler = restart_post_handler },
+        { .uri = "/api/factory_reset", .method = HTTP_POST, .handler = factory_reset_post_handler },
         { .uri = "/*",            .method = HTTP_GET,  .handler = redirect_handler },
     };
     for (int i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {

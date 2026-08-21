@@ -17,6 +17,7 @@ typedef struct {
 } history_point_t;
 
 esp_err_t history_store_init(void);
+esp_err_t history_store_format(void);
 esp_err_t history_store_append(uint32_t ts, uint16_t cpm);
 esp_err_t history_store_query(uint32_t since_ts,
                               history_point_t *out,

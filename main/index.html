@@ -38,6 +38,7 @@ input,select,button.wide{width:100%;padding:.7rem;margin-bottom:.7rem;border-rad
   background:#171d23;color:#e6e6e6;font-size:1rem}
 button.wide{background:#2f7dd1;border-color:#2f7dd1;font-weight:600;cursor:pointer}
 button.wide.alt{background:#171d23;border-color:#2a3138;font-weight:400}
+button.wide.danger{background:#8f2d2d;border-color:#8f2d2d}
 button.wide:disabled{opacity:.5;cursor:default}
 input[type=range]{padding:0;border:none;background:none;accent-color:#2f7dd1}
 label{display:block;color:#8a949e;font-size:.78rem;text-transform:uppercase;letter-spacing:.04em;margin-bottom:.25rem}
@@ -171,6 +172,8 @@ label output{float:right;color:#e6e6e6;font-variant-numeric:tabular-nums}
   <label class="row"><input type="checkbox" id="led_en"> Indicator LED</label>
   <label class="row"><input type="checkbox" id="chg_en"> Battery charging</label>
   <button class="wide" id="devsave" type="button">Save</button>
+  <button class="wide alt" id="restart" type="button">Reset device</button>
+  <button class="wide danger" id="factoryreset" type="button">Factory reset device</button>
   <div id="devmsg"></div>
 </section>
 
@@ -467,6 +470,23 @@ $('devsave').onclick = () => post({
   led_enabled: $('led_en').checked,
   batt_charge_en: $('chg_en').checked
 }, 'devsave', 'devmsg');
+
+async function deviceAction(url, button, prompt) {
+  if (!confirm(prompt)) return;
+  $(button).disabled = true;
+  $('devmsg').textContent = 'Restarting...';
+  try {
+    const r = await (await fetch(url, { method: 'POST' })).json();
+    $('devmsg').textContent = r.ok ? 'Restarting...' : 'Request failed';
+  } catch (e) {
+    $('devmsg').textContent = 'Request failed';
+  }
+  $(button).disabled = false;
+}
+
+$('restart').onclick = () => deviceAction('/api/restart', 'restart', 'Restart the device now?');
+$('factoryreset').onclick = () => deviceAction('/api/factory_reset', 'factoryreset',
+  'Erase all saved settings and Wi-Fi credentials, then restart the device?');
 
 $('livewin').onchange = async () => {
   await post({ history_short_window_s: Number($('livewin').value) }, 'devsave', 'devmsg');

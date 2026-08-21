@@ -2,6 +2,9 @@
 
 #include "config.h"
 #include "esp_log.h"
+#include "esp_random.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "geiger.h"
 #include "history_store.h"
 #include "mqtt.h"
@@ -36,5 +39,11 @@ void app_main(void)
     if (!wifi_has_credentials()) {
         ESP_ERROR_CHECK(wifi_prov_start(WIFI_PROV_BOTH));
         ESP_LOGI(TAG, "provisioning: BluFi over BLE, or join \"%s\"", wifi_softap_ssid());
+    }
+
+    for (;;) {
+        uint32_t delay_ms = 250 + (esp_random() % 2751);
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        board_simulate_tube_pulse();
     }
 }

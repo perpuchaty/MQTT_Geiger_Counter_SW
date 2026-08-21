@@ -17,7 +17,10 @@ extern "C" {
 /* -------------------------------------------------------------------------
  * Pinout
  * ---------------------------------------------------------------------- */
-#define PIN_LATCH GPIO_NUM_48//GPIO_NUM_0 //output
+#define TARGET_CPU ESP32C6
+
+#if defined(TARGET_CPU) && TARGET_CPU == ESP32C6
+#define PIN_LATCH GPIO_NUM_0 //output
 #define PIN_CHARGE_EN GPIO_NUM_1 //output
 #define PIN_CHRG GPIO_NUM_2 //input
 #define PIN_STBY GPIO_NUM_3 //input
@@ -35,8 +38,10 @@ extern "C" {
 #define PIN_LCD_CS GPIO_NUM_19  //output lcd ST7565P
 #define PIN_LCD_RESET GPIO_NUM_20//output lcd ST7565P
 #define PIN_LCD_A0 GPIO_NUM_21//output lcd ST7565P
-#define PIN_LCD_DATA0 GPIO_NUM_48//GPIO_NUM_22//output lcd ST7565P
-#define PIN_LCD_CLOCK GPIO_NUM_48//GPIO_NUM_23//output lcd ST7565P
+#define PIN_LCD_DATA0 GPIO_NUM_22//output lcd ST7565P
+#define PIN_LCD_CLOCK GPIO_NUM_23//output lcd ST7565P
+#endif
+
 
 /* -------------------------------------------------------------------------
  * LCD - ST7565P over hardware SPI (u8g2, full framebuffer mode)
@@ -54,7 +59,7 @@ extern "C" {
  * PWM (LEDC). ESP32-C6 only implements the low speed mode.
  * ---------------------------------------------------------------------- */
 #define PWM_SPEED_MODE          LEDC_LOW_SPEED_MODE
-#define PWM_CLK_SRC             LEDC_AUTO_CLK
+#define PWM_CLK_SRC             LEDC_USE_PLL_DIV_CLK
 
 /* Geiger tube HV boost converter */
 #define PWM_TUBE_TIMER          LEDC_TIMER_0
@@ -125,6 +130,8 @@ bool board_input_level(board_input_t in);
 esp_err_t board_input_set_isr(board_input_t in, board_input_isr_t cb, void *arg);
 /** Free running tube pulse counter, incremented by the PIN_TUBE_CNT ISR. */
 uint32_t board_tube_pulses(void);
+/** Adds one simulated tube pulse for hardware-free testing. */
+void board_simulate_tube_pulse(void);
 
 /* PWM */
 esp_err_t board_hv_set_duty(float duty_pct);
