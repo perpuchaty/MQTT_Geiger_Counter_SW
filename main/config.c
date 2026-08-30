@@ -21,21 +21,15 @@ static const char *TAG = "board";
  * GPIO
  * ====================================================================== */
 
-typedef struct {
-    gpio_num_t      pin;
-    gpio_int_type_t intr;
-    bool            pullup;
-} board_input_desc_t;
-
 /* Kept in RAM so the ISR never touches flash. */
-static board_input_desc_t s_in_desc[BOARD_IN_COUNT] = {
-    [BOARD_IN_CHRG]      = { PIN_CHRG,         GPIO_INTR_ANYEDGE, true  },
-    [BOARD_IN_STBY]      = { PIN_STBY,         GPIO_INTR_ANYEDGE, true  },
-    [BOARD_IN_TUBE_CNT]  = { PIN_TUBE_CNT,     GPIO_INTR_NEGEDGE, true  },
-    [BOARD_IN_VTUBE_OK]  = { PIN_VTUBE_OK,     GPIO_INTR_ANYEDGE, false },
-    [BOARD_IN_BTN_ENTER] = { PIN_BUTTON_ENTER, GPIO_INTR_ANYEDGE, true  },
-    [BOARD_IN_BTN_LEFT]  = { PIN_BUTTON_LEFT,  GPIO_INTR_ANYEDGE, true  },
-    [BOARD_IN_BTN_RIGHT] = { PIN_BUTTON_RIGHT, GPIO_INTR_ANYEDGE, true  },
+static const gpio_num_t s_in_pin[BOARD_IN_COUNT] = {
+    [BOARD_IN_CHRG]      = PIN_CHRG,
+    [BOARD_IN_STBY]      = PIN_STBY,
+    [BOARD_IN_TUBE_CNT]  = PIN_TUBE_CNT,
+    [BOARD_IN_VTUBE_OK]  = PIN_VTUBE_OK,
+    [BOARD_IN_BTN_ENTER] = PIN_BUTTON_ENTER,
+    [BOARD_IN_BTN_LEFT]  = PIN_BUTTON_LEFT,
+    [BOARD_IN_BTN_RIGHT] = PIN_BUTTON_RIGHT,
 };
 
 static board_input_isr_t s_in_cb[BOARD_IN_COUNT];
@@ -46,7 +40,7 @@ static portMUX_TYPE      s_in_lock = portMUX_INITIALIZER_UNLOCKED;
 static void IRAM_ATTR board_gpio_isr(void *arg)
 {
     board_input_t in = (board_input_t)(uintptr_t)arg;
-    bool level = gpio_get_level(s_in_desc[in].pin);
+    bool level = gpio_get_level(s_in_pin[in]);
 
     if (in == BOARD_IN_TUBE_CNT) {
         s_tube_pulses++;
@@ -69,28 +63,52 @@ static esp_err_t gpio_init(void)
     gpio_set_level(PIN_LATCH, 0);
     gpio_set_level(PIN_CHARGE_EN, 0);
     gpio_set_level(PIN_LED, 0);
-        gpio_set_level(PIN_LCD_RESET, 0);
-        gpio_set_level(PIN_LCD_A0, 0);
+    gpio_set_level(PIN_LCD_RESET, 0);
+    gpio_set_level(PIN_LCD_A0, 0);
 
-    for (int i = 0; i < BOARD_IN_COUNT; i++) {
-        gpio_config_t in = {
-            .pin_bit_mask = BIT64(s_in_desc[i].pin),
-            .mode         = GPIO_MODE_INPUT,
-            .pull_up_en   = s_in_desc[i].pullup ? GPIO_PULLUP_ENABLE : GPIO_PULLUP_DISABLE,
-            .pull_down_en = GPIO_PULLDOWN_DISABLE,
-            .intr_type    = s_in_desc[i].intr,
-        };
-        ESP_RETURN_ON_ERROR(gpio_config(&in), TAG, "input %d config failed", i);
-    }
+    gpio_config_t inputs_pullup = {
+        .pin_bit_mask = BIT64(PIN_CHRG) | BIT64(PIN_STBY) | BIT64(PIN_TUBE_CNT) |
+                        BIT64(PIN_BUTTON_ENTER) | BIT64(PIN_BUTTON_LEFT) | BIT64(PIN_BUTTON_RIGHT),
+        .mode         = GPIO_MODE_INPUT,
+        .pull_up_en   = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    ESP_RETURN_ON_ERROR(gpio_config(&inputs_pullup), TAG, "pull-up input config failed");
+
+    gpio_config_t input_no_pull = {
+        .pin_bit_mask = BIT64(PIN_VTUBE_OK),
+        .mode         = GPIO_MODE_INPUT,
+        .pull_up_en   = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    ESP_RETURN_ON_ERROR(gpio_config(&input_no_pull), TAG, "tube voltage input config failed");
 
     esp_err_t err = gpio_install_isr_service(ESP_INTR_FLAG_LEVEL1);
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
         return err;
     }
-    for (int i = 0; i < BOARD_IN_COUNT; i++) {
-        ESP_RETURN_ON_ERROR(gpio_isr_handler_add(s_in_desc[i].pin, board_gpio_isr, (void *)(uintptr_t)i),
-                            TAG, "isr add %d failed", i);
-    }
+    gpio_set_intr_type(PIN_CHRG, GPIO_INTR_ANYEDGE);
+    gpio_isr_handler_add(PIN_CHRG, board_gpio_isr, (void *)(uintptr_t)BOARD_IN_CHRG);
+
+    gpio_set_intr_type(PIN_STBY, GPIO_INTR_ANYEDGE);
+    gpio_isr_handler_add(PIN_STBY, board_gpio_isr, (void *)(uintptr_t)BOARD_IN_STBY);
+
+    gpio_set_intr_type(PIN_TUBE_CNT, GPIO_INTR_NEGEDGE);
+    gpio_isr_handler_add(PIN_TUBE_CNT, board_gpio_isr, (void *)(uintptr_t)BOARD_IN_TUBE_CNT);
+
+    gpio_set_intr_type(PIN_VTUBE_OK, GPIO_INTR_ANYEDGE);
+    gpio_isr_handler_add(PIN_VTUBE_OK, board_gpio_isr, (void *)(uintptr_t)BOARD_IN_VTUBE_OK);
+
+    gpio_set_intr_type(PIN_BUTTON_ENTER, GPIO_INTR_ANYEDGE);
+    gpio_isr_handler_add(PIN_BUTTON_ENTER, board_gpio_isr, (void *)(uintptr_t)BOARD_IN_BTN_ENTER);
+
+    gpio_set_intr_type(PIN_BUTTON_LEFT, GPIO_INTR_ANYEDGE);
+    gpio_isr_handler_add(PIN_BUTTON_LEFT, board_gpio_isr, (void *)(uintptr_t)BOARD_IN_BTN_LEFT);
+    
+    gpio_set_intr_type(PIN_BUTTON_RIGHT, GPIO_INTR_ANYEDGE);
+    gpio_isr_handler_add(PIN_BUTTON_RIGHT, board_gpio_isr, (void *)(uintptr_t)BOARD_IN_BTN_RIGHT);
     return ESP_OK;
 }
 
@@ -103,7 +121,7 @@ bool board_input_level(board_input_t in)
     if (in >= BOARD_IN_COUNT) {
         return false;
     }
-    return gpio_get_level(s_in_desc[in].pin) != 0;
+    return gpio_get_level(s_in_pin[in]) != 0;
 }
 
 esp_err_t board_input_set_isr(board_input_t in, board_input_isr_t cb, void *arg)

@@ -73,6 +73,21 @@ typedef struct {
 
 static QueueHandle_t s_button_events;
 
+esp_err_t button_simulate(board_input_t input)
+{
+    ESP_RETURN_ON_FALSE(s_button_events, ESP_ERR_INVALID_STATE, TAG, "button queue not ready");
+    ESP_RETURN_ON_FALSE(input >= BOARD_IN_BTN_ENTER && input <= BOARD_IN_BTN_RIGHT,
+                        ESP_ERR_INVALID_ARG, TAG, "not a button");
+
+    button_event_t pressed = { .input = input, .level = false };
+    button_event_t released = { .input = input, .level = true };
+    ESP_RETURN_ON_FALSE(xQueueSend(s_button_events, &pressed, 0) == pdPASS,
+                        ESP_ERR_NO_MEM, TAG, "button queue full");
+    ESP_RETURN_ON_FALSE(xQueueSend(s_button_events, &released, 0) == pdPASS,
+                        ESP_ERR_NO_MEM, TAG, "button queue full");
+    return ESP_OK;
+}
+
 static void button_state_changed_isr(board_input_t input, bool level, void *arg)
 {
     button_event_t event = { .input = input, .level = level };
@@ -90,10 +105,11 @@ static void button_event_task(void *arg)
 
     for (;;) {
         xQueueReceive(s_button_events, &event, portMAX_DELAY);
-        ESP_LOGI(TAG, "buttons state: L=%d, E=%d, R=%d", 
-                 gpio_get_level(BOARD_IN_BTN_LEFT),
-                 gpio_get_level(BOARD_IN_BTN_ENTER),
-                 gpio_get_level(BOARD_IN_BTN_RIGHT));
+        ESP_LOGI(TAG, "button %d %s; state: L=%s E=%s R=%s", event.input,
+             event.level ? "released" : "pressed",
+             board_input_level(BOARD_IN_BTN_LEFT) ? "released" : "pressed",
+             board_input_level(BOARD_IN_BTN_ENTER) ? "released" : "pressed",
+             board_input_level(BOARD_IN_BTN_RIGHT) ? "released" : "pressed");
         }
 }
 
@@ -104,31 +120,11 @@ static esp_err_t button_events_init(void)
     ESP_RETURN_ON_FALSE(xTaskCreate(button_event_task, "buttons", 2048, NULL, 5, NULL) == pdPASS,
                         ESP_ERR_NO_MEM, TAG, "button task");
 
-    ESP_RETURN_ON_ERROR(board_input_set_isr(BOARD_IN_BTN_ENTER, button_state_changed_isr, NULL),
-                        TAG, "enter button isr");
-    ESP_RETURN_ON_ERROR(board_input_set_isr(BOARD_IN_BTN_LEFT, button_state_changed_isr, NULL),
-                        TAG, "left button isr");
-    ESP_RETURN_ON_ERROR(board_input_set_isr(BOARD_IN_BTN_RIGHT, button_state_changed_isr, NULL),
-                        TAG, "right button isr");
+    board_input_set_isr(BOARD_IN_BTN_ENTER, button_state_changed_isr, NULL);
+    board_input_set_isr(BOARD_IN_BTN_LEFT, button_state_changed_isr, NULL);
+    board_input_set_isr(BOARD_IN_BTN_RIGHT, button_state_changed_isr, NULL);
     return ESP_OK;
 }
-
-static void draw_bluetooth_icon(u8g2_t *lcd, int x, int y, bool connected)
-{
-    u8g2_DrawLine(lcd, x + 3, y, x + 3, y + 10);
-    u8g2_DrawLine(lcd, x + 3, y, x + 7, y + 3);
-    u8g2_DrawLine(lcd, x + 7, y + 3, x + 3, y + 5);
-    u8g2_DrawLine(lcd, x + 3, y + 5, x + 7, y + 8);
-    u8g2_DrawLine(lcd, x + 7, y + 8, x + 3, y + 10);
-    if (!connected) {
-        u8g2_DrawLine(lcd, x, y + 10, x + 9, y);
-    }
-}
-
-
-
-
-
 
 static void nvs_bringup(void)
 {

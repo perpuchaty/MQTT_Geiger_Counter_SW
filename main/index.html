@@ -97,6 +97,11 @@ label output{float:right;color:#e6e6e6;font-variant-numeric:tabular-nums}
     <div class="card"><i>Tube HV</i><b id="hv">--</b></div>
     <div class="card"><i>Battery</i><b id="vbat">--</b></div>
   </div>
+  <div class="grid">
+    <button class="wide alt" type="button" data-button="left">Left</button>
+    <button class="wide alt" type="button" data-button="enter">Enter</button>
+    <button class="wide alt" type="button" data-button="right">Right</button>
+  </div>
 </section>
 
 <section id="history">
@@ -380,6 +385,10 @@ async function save() {
 $('rescan').onclick = scan;
 $('save').onclick = save;
 $('gowifi').onclick = () => { show('wifi'); if (!$('list').children.length) scan(); };
+
+document.querySelectorAll('[data-button]').forEach(button => {
+  button.onclick = () => fetch('/api/button?' + button.dataset.button, { method: 'POST' });
+});
 
 /* ---- settings tabs ---- */
 const mqttMsg = t => $('mqttmsg').textContent = t;

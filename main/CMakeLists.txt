@@ -1,4 +1,5 @@
 idf_component_register(SRCS "config.c"
+                            "api.c"
                             "main.c"
                             "lcd.c"
                             "geiger.c"

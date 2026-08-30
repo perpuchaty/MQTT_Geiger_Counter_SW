@@ -6,6 +6,7 @@
 #include <time.h>
 
 #include "blufi_example.h"
+#include "api.h"
 #include "cJSON.h"
 #include "config.h"
 #include "esp_blufi.h"
@@ -421,12 +422,6 @@ static esp_err_t send_json(httpd_req_t *req, cJSON *root)
     return err;
 }
 
-static esp_err_t root_get_handler(httpd_req_t *req)
-{
-    httpd_resp_set_type(req, "text/html");
-    return httpd_resp_send(req, index_html_start, index_html_end - index_html_start - 1);
-}
-
 static esp_err_t live_get_handler(httpd_req_t *req)
 {
     int hv_mv = 0;
@@ -773,6 +768,31 @@ static esp_err_t redirect_handler(httpd_req_t *req)
     return httpd_resp_send(req, NULL, 0);
 }
 
+static esp_err_t http_request_handler(httpd_req_t *req)
+{
+    esp_err_t err = api_handle_request(req);
+    if (err != ESP_ERR_NOT_FOUND) {
+        return err;
+    }
+
+    if (req->method == HTTP_GET) {
+        if (strcmp(req->uri, "/api/live") == 0) return live_get_handler(req);
+        if (strcmp(req->uri, "/api/history") == 0) return history_get_handler(req);
+        if (strcmp(req->uri, "/api/history_csv") == 0) return history_csv_get_handler(req);
+        if (strcmp(req->uri, "/api/scan") == 0) return scan_get_handler(req);
+        if (strcmp(req->uri, "/api/status") == 0) return status_get_handler(req);
+        if (strcmp(req->uri, "/api/settings") == 0) return settings_get_handler(req);
+        return redirect_handler(req);
+    }
+    if (req->method == HTTP_POST) {
+        if (strcmp(req->uri, "/api/settings") == 0) return settings_post_handler(req);
+        if (strcmp(req->uri, "/api/connect") == 0) return connect_post_handler(req);
+        if (strcmp(req->uri, "/api/restart") == 0) return restart_post_handler(req);
+        if (strcmp(req->uri, "/api/factory_reset") == 0) return factory_reset_post_handler(req);
+    }
+    return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not found");
+}
+
 /* =========================================================================
  * Captive portal DNS: answers every A query with the SoftAP address
  * ====================================================================== */
@@ -919,31 +939,18 @@ static esp_err_t http_start(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port      = WIFI_HTTP_PORT;
-    cfg.max_uri_handlers = 12;
+    cfg.max_uri_handlers = 1;
     cfg.stack_size       = 8192;
     cfg.lru_purge_enable = true;
     cfg.uri_match_fn     = httpd_uri_match_wildcard;
     ESP_RETURN_ON_ERROR(httpd_start(&s_httpd, &cfg), TAG, "httpd");
 
-    /* Order matters: the wildcard entry must be registered last. */
-    static const httpd_uri_t routes[] = {
-        { .uri = "/",             .method = HTTP_GET,  .handler = root_get_handler },
-        { .uri = "/api/live",     .method = HTTP_GET,  .handler = live_get_handler },
-        { .uri = "/api/history",  .method = HTTP_GET,  .handler = history_get_handler },
-        { .uri = "/api/history_csv", .method = HTTP_GET, .handler = history_csv_get_handler },
-        { .uri = "/api/scan",     .method = HTTP_GET,  .handler = scan_get_handler },
-        { .uri = "/api/status",   .method = HTTP_GET,  .handler = status_get_handler },
-        { .uri = "/api/settings", .method = HTTP_GET,  .handler = settings_get_handler },
-        { .uri = "/api/settings", .method = HTTP_POST, .handler = settings_post_handler },
-        { .uri = "/api/connect",  .method = HTTP_POST, .handler = connect_post_handler },
-        { .uri = "/api/restart",  .method = HTTP_POST, .handler = restart_post_handler },
-        { .uri = "/api/factory_reset", .method = HTTP_POST, .handler = factory_reset_post_handler },
-        { .uri = "/*",            .method = HTTP_GET,  .handler = redirect_handler },
+    const httpd_uri_t route = {
+        .uri = "/*",
+        .method = HTTP_ANY,
+        .handler = http_request_handler,
     };
-    for (int i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
-        ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_httpd, &routes[i]), TAG, "route %s", routes[i].uri);
-    }
-    return ESP_OK;
+    return httpd_register_uri_handler(s_httpd, &route);
 }
 
 static esp_err_t mdns_start(void)
