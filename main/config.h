@@ -65,8 +65,9 @@ extern "C" {
 #define PWM_TUBE_TIMER          LEDC_TIMER_0
 #define PWM_TUBE_CHANNEL        LEDC_CHANNEL_0
 #define PWM_TUBE_RES            LEDC_TIMER_10_BIT
-#define PWM_TUBE_FREQ_HZ        40000
-#define PWM_TUBE_DUTY_MAX_PCT   40.0f              /* hard limit, protects inductor and FET */
+#define PWM_TUBE_FREQ_HZ        2000
+#define PWM_TUBE_STARTUP_DUTY_PCT 40.0f
+#define PWM_TUBE_DUTY_MAX_PCT   50.0f              /* hard limit, protects inductor and FET */
 
 /* LCD backlight */
 #define PWM_BACKLIGHT_TIMER     LEDC_TIMER_1
@@ -89,6 +90,8 @@ extern "C" {
 #define BOARD_ADC_FRAME_BYTES   256                /* must be a multiple of 4 */
 #define BOARD_ADC_POOL_BYTES    1024
 #define BOARD_ADC_IIR_SHIFT     5                  /* averaging time constant: 32 samples/channel */
+#define TUBE_DIVIDER_TOP_OHM    80000000UL
+#define TUBE_DIVIDER_BOTTOM_OHM 510000UL
 
 typedef enum {
     BOARD_ADC_VLATCH = 0,   /* PIN_ADC_VLATCH - battery / latch rail */
@@ -137,6 +140,10 @@ void board_simulate_tube_pulse(void);
 /* PWM */
 esp_err_t board_hv_set_duty(float duty_pct);
 esp_err_t board_hv_set_freq(uint32_t freq_hz);
+esp_err_t board_hv_set_enabled(bool enabled);
+bool board_hv_is_enabled(void);
+float board_hv_duty_pct(void);
+uint32_t board_hv_freq_hz(void);
 esp_err_t board_backlight_set(uint8_t duty_pct);
 esp_err_t board_buzzer_on(uint32_t freq_hz, uint8_t duty_pct);
 esp_err_t board_buzzer_off(void);
@@ -144,6 +151,7 @@ esp_err_t board_buzzer_off(void);
 /* ADC, values are refreshed continuously in the background */
 esp_err_t board_adc_get_raw(board_adc_ch_t ch, int *raw);
 esp_err_t board_adc_get_mv(board_adc_ch_t ch, int *mv);
+esp_err_t board_tube_voltage_get_mv(int *mv);
 
 /* LCD, NULL when the display pins are set to -1 */
 u8g2_t *board_lcd(void);

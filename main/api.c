@@ -1,5 +1,6 @@
 #include "api.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "config.h"
@@ -42,6 +43,40 @@ static esp_err_t button_post_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
 
+static esp_err_t hv_post_handler(httpd_req_t *req)
+{
+    char query[96];
+    char value[12];
+
+    if (httpd_req_get_url_query_len(req) == 0 ||
+        httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "settings missing");
+    }
+
+    if (httpd_query_key_value(query, "freq_hz", value, sizeof(value)) == ESP_OK) {
+        char *end;
+        uint32_t frequency = strtoul(value, &end, 10);
+        if (*value == '\0' || *end != '\0' || board_hv_set_freq(frequency) != ESP_OK) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid frequency");
+        }
+    }
+    if (httpd_query_key_value(query, "duty_pct", value, sizeof(value)) == ESP_OK) {
+        char *end;
+        float duty = strtof(value, &end);
+        if (*value == '\0' || *end != '\0' || board_hv_set_duty(duty) != ESP_OK) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid duty");
+        }
+    }
+    if (httpd_query_key_value(query, "enabled", value, sizeof(value)) == ESP_OK) {
+        if ((strcmp(value, "0") != 0 && strcmp(value, "1") != 0) ||
+            board_hv_set_enabled(value[0] == '1') != ESP_OK) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid enable state");
+        }
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
 static bool uri_path_is(const char *uri, const char *path)
 {
     size_t path_len = strcspn(uri, "?");
@@ -55,6 +90,9 @@ esp_err_t api_handle_request(httpd_req_t *req)
     }
     if (req->method == HTTP_POST && uri_path_is(req->uri, "/api/button")) {
         return button_post_handler(req);
+    }
+    if (req->method == HTTP_POST && uri_path_is(req->uri, "/api/hv")) {
+        return hv_post_handler(req);
     }
     return ESP_ERR_NOT_FOUND;
 }

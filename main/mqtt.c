@@ -125,7 +125,7 @@ static void mqtt_publish_state(void)
     int vbat_mv = 0;
     wifi_ap_record_t ap = {0};
 
-    board_adc_get_mv(BOARD_ADC_TUBE, &hv_mv);
+    board_tube_voltage_get_mv(&hv_mv);
     board_adc_get_mv(BOARD_ADC_VLATCH, &vbat_mv);
     esp_wifi_sta_get_ap_info(&ap);
 

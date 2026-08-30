@@ -110,7 +110,8 @@ static void button_event_task(void *arg)
              board_input_level(BOARD_IN_BTN_LEFT) ? "released" : "pressed",
              board_input_level(BOARD_IN_BTN_ENTER) ? "released" : "pressed",
              board_input_level(BOARD_IN_BTN_RIGHT) ? "released" : "pressed");
-        }
+        lcd_handle_button(event.input, !event.level);
+    }
 }
 
 static esp_err_t button_events_init(void)
@@ -144,6 +145,8 @@ void app_main(void)
 
     ESP_ERROR_CHECK(board_init());
     board_apply_settings();
+    ESP_ERROR_CHECK(board_hv_set_duty(PWM_TUBE_STARTUP_DUTY_PCT));
+    ESP_ERROR_CHECK(board_hv_set_enabled(settings_get()->hv_start_enabled));
     ESP_ERROR_CHECK(lcd_backlight_init());
     ESP_ERROR_CHECK(button_events_init());
     ESP_ERROR_CHECK(tube_tick_init());

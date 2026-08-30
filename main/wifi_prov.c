@@ -427,7 +427,7 @@ static esp_err_t live_get_handler(httpd_req_t *req)
 {
     int hv_mv = 0;
     int vbat_mv = 0;
-    board_adc_get_mv(BOARD_ADC_TUBE, &hv_mv);
+    board_tube_voltage_get_mv(&hv_mv);
     board_adc_get_mv(BOARD_ADC_VLATCH, &vbat_mv);
 
     cJSON *root = cJSON_CreateObject();
@@ -437,6 +437,9 @@ static esp_err_t live_get_handler(httpd_req_t *req)
     cJSON_AddNumberToObject(root, "hv_mv", hv_mv);
     cJSON_AddNumberToObject(root, "vbat_mv", vbat_mv);
     cJSON_AddBoolToObject(root, "hv_ok", board_input_level(BOARD_IN_VTUBE_OK));
+    cJSON_AddBoolToObject(root, "hv_pwm_enabled", board_hv_is_enabled());
+    cJSON_AddNumberToObject(root, "hv_pwm_duty_pct", board_hv_duty_pct());
+    cJSON_AddNumberToObject(root, "hv_pwm_freq_hz", board_hv_freq_hz());
     cJSON_AddNumberToObject(root, "uptime", esp_timer_get_time() / 1000000);
     return send_json(req, root);
 }
@@ -668,6 +671,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     cJSON_AddNumberToObject(root, "spk_volume", cfg->spk_volume);
     cJSON_AddNumberToObject(root, "spk_sound", cfg->spk_sound);
     cJSON_AddBoolToObject(root, "batt_charge_en", cfg->batt_charge_en);
+    cJSON_AddBoolToObject(root, "hv_start_enabled", cfg->hv_start_enabled);
     cJSON_AddBoolToObject(root, "led_enabled", cfg->led_enabled);
     cJSON_AddNumberToObject(root, "lcd_brightness", cfg->lcd_brightness);
     cJSON_AddBoolToObject(root, "lcd_auto_dim", cfg->lcd_auto_dim);
@@ -709,6 +713,7 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
     json_get_u8(root, "spk_volume", &cfg.spk_volume);
     json_get_u8(root, "spk_sound", &cfg.spk_sound);
     json_get_bool(root, "batt_charge_en", &cfg.batt_charge_en);
+    json_get_bool(root, "hv_start_enabled", &cfg.hv_start_enabled);
     json_get_bool(root, "led_enabled", &cfg.led_enabled);
     json_get_u8(root, "lcd_brightness", &cfg.lcd_brightness);
     json_get_bool(root, "lcd_auto_dim", &cfg.lcd_auto_dim);

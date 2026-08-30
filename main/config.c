@@ -148,6 +148,10 @@ void board_simulate_tube_pulse(void)
  * PWM (LEDC)
  * ====================================================================== */
 
+static float s_hv_duty_pct;
+static uint32_t s_hv_freq_hz = PWM_TUBE_FREQ_HZ;
+static bool s_hv_enabled;
+
 static uint32_t duty_from_pct(ledc_timer_bit_t res, float pct)
 {
     if (pct < 0.0f) pct = 0.0f;
@@ -198,15 +202,47 @@ static esp_err_t pwm_apply(ledc_channel_t ch, uint32_t duty)
 
 esp_err_t board_hv_set_duty(float duty_pct)
 {
+    if (duty_pct < 0.0f) {
+        duty_pct = 0.0f;
+    }
     if (duty_pct > PWM_TUBE_DUTY_MAX_PCT) {
         duty_pct = PWM_TUBE_DUTY_MAX_PCT;
     }
-    return pwm_apply(PWM_TUBE_CHANNEL, duty_from_pct(PWM_TUBE_RES, duty_pct));
+    ESP_RETURN_ON_ERROR(pwm_apply(PWM_TUBE_CHANNEL,
+                                  duty_from_pct(PWM_TUBE_RES, s_hv_enabled ? duty_pct : 0.0f)),
+                        TAG, "hv duty");
+    s_hv_duty_pct = duty_pct;
+    return ESP_OK;
+}
+
+esp_err_t board_hv_set_enabled(bool enabled)
+{
+    s_hv_enabled = enabled;
+    return pwm_apply(PWM_TUBE_CHANNEL,
+                     duty_from_pct(PWM_TUBE_RES, enabled ? s_hv_duty_pct : 0.0f));
+}
+
+bool board_hv_is_enabled(void)
+{
+    return s_hv_enabled;
 }
 
 esp_err_t board_hv_set_freq(uint32_t freq_hz)
 {
-    return ledc_set_freq(PWM_SPEED_MODE, PWM_TUBE_TIMER, freq_hz);
+    ESP_RETURN_ON_FALSE(freq_hz >= 100 && freq_hz <= 100000, ESP_ERR_INVALID_ARG, TAG, "hv frequency");
+    ESP_RETURN_ON_ERROR(ledc_set_freq(PWM_SPEED_MODE, PWM_TUBE_TIMER, freq_hz), TAG, "hv frequency");
+    s_hv_freq_hz = freq_hz;
+    return ESP_OK;
+}
+
+float board_hv_duty_pct(void)
+{
+    return s_hv_duty_pct;
+}
+
+uint32_t board_hv_freq_hz(void)
+{
+    return s_hv_freq_hz;
 }
 
 esp_err_t board_backlight_set(uint8_t duty_pct)
@@ -365,6 +401,17 @@ esp_err_t board_adc_get_mv(board_adc_ch_t ch, int *mv)
     ESP_RETURN_ON_ERROR(board_adc_get_raw(ch, &raw), TAG, "raw");
     ESP_RETURN_ON_FALSE(s_adc_cali[ch], ESP_ERR_NOT_SUPPORTED, TAG, "not calibrated");
     return adc_cali_raw_to_voltage(s_adc_cali[ch], raw, mv);
+}
+
+esp_err_t board_tube_voltage_get_mv(int *mv)
+{
+    int divider_mv;
+    ESP_RETURN_ON_FALSE(mv, ESP_ERR_INVALID_ARG, TAG, "null voltage output");
+    ESP_RETURN_ON_ERROR(board_adc_get_mv(BOARD_ADC_TUBE, &divider_mv), TAG, "tube divider voltage");
+
+    *mv = (int)(((int64_t)divider_mv * (TUBE_DIVIDER_TOP_OHM + TUBE_DIVIDER_BOTTOM_OHM) +
+                 TUBE_DIVIDER_BOTTOM_OHM / 2) / TUBE_DIVIDER_BOTTOM_OHM);
+    return ESP_OK;
 }
 
 /* =========================================================================

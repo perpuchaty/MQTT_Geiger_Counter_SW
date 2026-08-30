@@ -67,6 +67,7 @@ label output{float:right;color:#e6e6e6;font-variant-numeric:tabular-nums}
   <button data-tab="history">History</button>
   <button data-tab="mqtt">MQTT</button>
   <button data-tab="tube">Tube</button>
+  <button data-tab="hv">High voltage</button>
   <button data-tab="device">Device</button>
   <button data-tab="system">System</button>
 </nav>
@@ -96,6 +97,7 @@ label output{float:right;color:#e6e6e6;font-variant-numeric:tabular-nums}
     <div class="card"><i>Total counts</i><b id="total">--</b></div>
     <div class="card"><i>Tube HV</i><b id="hv">--</b></div>
     <div class="card"><i>Battery</i><b id="vbat">--</b></div>
+    <div class="card"><i>HV PWM</i><b id="hvpwm">--</b></div>
   </div>
   <div class="grid">
     <button class="wide alt" type="button" data-button="left">Left</button>
@@ -162,6 +164,20 @@ label output{float:right;color:#e6e6e6;font-variant-numeric:tabular-nums}
   <div id="tubemsg"></div>
 </section>
 
+<section id="hv">
+  <div class="grid">
+    <div class="card"><i>Tube voltage</i><b id="hvvoltage">--</b></div>
+    <div class="card"><i>HV state</i><b id="hvstate">--</b></div>
+  </div>
+  <label class="row"><input type="checkbox" id="hv_enabled"> Enable high voltage</label>
+  <label for="hv_duty">PWM duty <output id="hv_duty_v"></output></label>
+  <input id="hv_duty" type="range" min="0" max="50" step="1">
+  <label for="hv_freq">PWM frequency (Hz)</label>
+  <input id="hv_freq" type="number" min="100" max="100000" step="100">
+  <button class="wide danger" id="hvapply" type="button">Apply high voltage settings</button>
+  <div id="hvmsg"></div>
+</section>
+
 <section id="device">
   <label for="spk_vol">Speaker volume <output id="spk_vol_v"></output></label>
   <input id="spk_vol" type="range" min="0" max="100">
@@ -176,6 +192,7 @@ label output{float:right;color:#e6e6e6;font-variant-numeric:tabular-nums}
   <label class="row"><input type="checkbox" id="lcd_dim"> Dim the LCD when idle</label>
   <label class="row"><input type="checkbox" id="led_en"> Indicator LED</label>
   <label class="row"><input type="checkbox" id="chg_en"> Battery charging</label>
+  <label class="row"><input type="checkbox" id="hv_start"> Generate high voltage at startup</label>
   <button class="wide" id="devsave" type="button">Save</button>
   <button class="wide alt" id="restart" type="button">Reset device</button>
   <button class="wide danger" id="factoryreset" type="button">Factory reset device</button>
@@ -215,6 +232,13 @@ async function live() {
     $('total').textContent = d.total;
     $('hv').textContent = fmtV(d.hv_mv);
     $('vbat').textContent = fmtV(d.vbat_mv);
+    $('hvpwm').textContent = d.hv_pwm_freq_hz + ' Hz / ' + d.hv_pwm_duty_pct.toFixed(0) + '%';
+    $('hvvoltage').textContent = fmtV(d.hv_mv);
+    $('hvstate').textContent = d.hv_pwm_enabled ? 'ON' : 'OFF';
+    if (document.activeElement !== $('hv_enabled')) $('hv_enabled').checked = d.hv_pwm_enabled;
+    if (document.activeElement !== $('hv_duty')) $('hv_duty').value = d.hv_pwm_duty_pct.toFixed(0);
+    if (document.activeElement !== $('hv_freq')) $('hv_freq').value = d.hv_pwm_freq_hz;
+    $('hv_duty_v').textContent = $('hv_duty').value + '%';
     $('uptime').textContent = new Date(d.uptime * 1000).toISOString().substr(11, 8);
   } catch (e) { /* transient while the radio switches channels */ }
 }
@@ -420,6 +444,7 @@ async function loadSettings(fill = true) {
     $('lcd_dim').checked = s.lcd_auto_dim;
     $('led_en').checked = s.led_enabled;
     $('chg_en').checked = s.batt_charge_en;
+    $('hv_start').checked = s.hv_start_enabled;
     $('livewin').value = String(s.history_short_window_s || 300);
     sliders();
   } catch (e) { mqttMsg('Could not load settings'); }
@@ -446,6 +471,7 @@ function sliders() {
 }
 $('spk_vol').oninput = sliders;
 $('lcd_bri').oninput = sliders;
+$('hv_duty').oninput = () => { $('hv_duty_v').textContent = $('hv_duty').value + '%'; };
 
 $('mqttsave').onclick = async () => {
   const body = {
@@ -471,13 +497,29 @@ $('tubesave').onclick = () => post({
   tube_cpm_per_usvh: Number($('tb_cpm').value)
 }, 'tubesave', 'tubemsg');
 
+$('hvapply').onclick = async () => {
+  const query = new URLSearchParams({
+    enabled: $('hv_enabled').checked ? '1' : '0',
+    duty_pct: $('hv_duty').value,
+    freq_hz: $('hv_freq').value
+  });
+  $('hvapply').disabled = true;
+  $('hvmsg').textContent = 'Applying...';
+  try {
+    const r = await (await fetch('/api/hv?' + query, { method: 'POST' })).json();
+    $('hvmsg').textContent = r.ok ? 'Applied' : 'Update failed';
+  } catch (e) { $('hvmsg').textContent = 'Update failed'; }
+  $('hvapply').disabled = false;
+};
+
 $('devsave').onclick = () => post({
   spk_volume: Number($('spk_vol').value),
   spk_sound: Number($('spk_snd').value),
   lcd_brightness: Number($('lcd_bri').value),
   lcd_auto_dim: $('lcd_dim').checked,
   led_enabled: $('led_en').checked,
-  batt_charge_en: $('chg_en').checked
+  batt_charge_en: $('chg_en').checked,
+  hv_start_enabled: $('hv_start').checked
 }, 'devsave', 'devmsg');
 
 async function deviceAction(url, button, prompt) {

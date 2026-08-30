@@ -64,6 +64,9 @@ typedef struct {
     /* Power */
     bool     batt_charge_en;
 
+    /* High voltage */
+    bool     hv_start_enabled;   /* enable the tube HV supply at boot */
+
     /* Indicators */
     bool     led_enabled;
     uint8_t  lcd_brightness;     /* 0-100 */

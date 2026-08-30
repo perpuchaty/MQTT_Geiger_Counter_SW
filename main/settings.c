@@ -47,6 +47,7 @@ static const setting_desc_t s_desc[] = {
     S_FIELD("spk_vol",    T_U8,    spk_volume),
     S_FIELD("spk_snd",    T_U8,    spk_sound),
     S_FIELD("chg_en",     T_BOOL,  batt_charge_en),
+    S_FIELD("hv_start",   T_BOOL,  hv_start_enabled),
     S_FIELD("led_en",     T_BOOL,  led_enabled),
     S_FIELD("lcd_bri",    T_U8,    lcd_brightness),
     S_FIELD("lcd_dim",    T_BOOL,  lcd_auto_dim),
