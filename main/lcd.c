@@ -8,9 +8,43 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "geiger.h"
+#include "settings.h"
 #include "wifi_prov.h"
 
 static const char *TAG = "lcd";
+static volatile uint8_t s_backlight_target;
+
+static void backlight_fade_task(void *arg)
+{
+    uint8_t brightness = 0;
+
+    for (;;) {
+        uint8_t target = s_backlight_target;
+        if (brightness < target) {
+            brightness++;
+            board_backlight_set(brightness);
+        } else if (brightness > target) {
+            brightness--;
+            board_backlight_set(brightness);
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+esp_err_t lcd_backlight_init(void)
+{
+    s_backlight_target = 0;
+    ESP_RETURN_ON_ERROR(board_backlight_set(0), TAG, "backlight off");
+    ESP_RETURN_ON_FALSE(xTaskCreate(backlight_fade_task, "backlight", 2048, NULL, 4, NULL) == pdPASS,
+                        ESP_ERR_NO_MEM, TAG, "backlight task");
+    lcd_set_backlight(settings_get()->lcd_brightness);
+    return ESP_OK;
+}
+
+void lcd_set_backlight(uint8_t brightness)
+{
+    s_backlight_target = brightness > 100 ? 100 : brightness;
+}
 
 static void draw_bluetooth_icon(u8g2_t *display, int x, int y, bool connected)
 {

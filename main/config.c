@@ -510,5 +510,4 @@ void board_apply_settings(void)
     if (!cfg->led_enabled) {
         board_set_led(false);
     }
-    board_backlight_set(cfg->lcd_brightness);
 }

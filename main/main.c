@@ -144,6 +144,7 @@ void app_main(void)
 
     ESP_ERROR_CHECK(board_init());
     board_apply_settings();
+    ESP_ERROR_CHECK(lcd_backlight_init());
     ESP_ERROR_CHECK(button_events_init());
     ESP_ERROR_CHECK(tube_tick_init());
     lcd_draw_startup_screen();

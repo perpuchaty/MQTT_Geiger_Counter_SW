@@ -23,6 +23,7 @@
 #include "freertos/event_groups.h"
 #include "geiger.h"
 #include "history_store.h"
+#include "lcd.h"
 #include "lwip/sockets.h"
 #include "mdns.h"
 #include "mqtt.h"
@@ -718,6 +719,7 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
         return httpd_resp_send_500(req);
     }
     board_apply_settings();
+    lcd_set_backlight(cfg.lcd_brightness);
     mqtt_apply();
 
     cJSON *resp = cJSON_CreateObject();
@@ -768,6 +770,12 @@ static esp_err_t redirect_handler(httpd_req_t *req)
     return httpd_resp_send(req, NULL, 0);
 }
 
+static bool uri_path_is(const char *uri, const char *path)
+{
+    size_t path_len = strcspn(uri, "?");
+    return strlen(path) == path_len && strncmp(uri, path, path_len) == 0;
+}
+
 static esp_err_t http_request_handler(httpd_req_t *req)
 {
     esp_err_t err = api_handle_request(req);
@@ -776,19 +784,19 @@ static esp_err_t http_request_handler(httpd_req_t *req)
     }
 
     if (req->method == HTTP_GET) {
-        if (strcmp(req->uri, "/api/live") == 0) return live_get_handler(req);
-        if (strcmp(req->uri, "/api/history") == 0) return history_get_handler(req);
-        if (strcmp(req->uri, "/api/history_csv") == 0) return history_csv_get_handler(req);
-        if (strcmp(req->uri, "/api/scan") == 0) return scan_get_handler(req);
-        if (strcmp(req->uri, "/api/status") == 0) return status_get_handler(req);
-        if (strcmp(req->uri, "/api/settings") == 0) return settings_get_handler(req);
+        if (uri_path_is(req->uri, "/api/live")) return live_get_handler(req);
+        if (uri_path_is(req->uri, "/api/history")) return history_get_handler(req);
+        if (uri_path_is(req->uri, "/api/history_csv")) return history_csv_get_handler(req);
+        if (uri_path_is(req->uri, "/api/scan")) return scan_get_handler(req);
+        if (uri_path_is(req->uri, "/api/status")) return status_get_handler(req);
+        if (uri_path_is(req->uri, "/api/settings")) return settings_get_handler(req);
         return redirect_handler(req);
     }
     if (req->method == HTTP_POST) {
-        if (strcmp(req->uri, "/api/settings") == 0) return settings_post_handler(req);
-        if (strcmp(req->uri, "/api/connect") == 0) return connect_post_handler(req);
-        if (strcmp(req->uri, "/api/restart") == 0) return restart_post_handler(req);
-        if (strcmp(req->uri, "/api/factory_reset") == 0) return factory_reset_post_handler(req);
+        if (uri_path_is(req->uri, "/api/settings")) return settings_post_handler(req);
+        if (uri_path_is(req->uri, "/api/connect")) return connect_post_handler(req);
+        if (uri_path_is(req->uri, "/api/restart")) return restart_post_handler(req);
+        if (uri_path_is(req->uri, "/api/factory_reset")) return factory_reset_post_handler(req);
     }
     return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not found");
 }

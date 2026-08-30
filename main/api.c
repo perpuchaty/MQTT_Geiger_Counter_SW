@@ -4,8 +4,6 @@
 
 #include "config.h"
 
-#include "esp_log.h"
-
 extern const char index_html_start[] asm("_binary_index_html_start");
 extern const char index_html_end[] asm("_binary_index_html_end");
 
@@ -44,13 +42,18 @@ static esp_err_t button_post_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
 
+static bool uri_path_is(const char *uri, const char *path)
+{
+    size_t path_len = strcspn(uri, "?");
+    return strlen(path) == path_len && strncmp(uri, path, path_len) == 0;
+}
+
 esp_err_t api_handle_request(httpd_req_t *req)
 {
-    ESP_LOGI("api_handle_request", "Handling request: %s %s", req->method == HTTP_GET ? "GET" : "POST", req->uri);
-    if (req->method == HTTP_GET && strcmp(req->uri, "/") == 0) {
+    if (req->method == HTTP_GET && uri_path_is(req->uri, "/")) {
         return root_get_handler(req);
     }
-    if (req->method == HTTP_POST && strcmp(req->uri, "/api/button") == 0) {
+    if (req->method == HTTP_POST && uri_path_is(req->uri, "/api/button")) {
         return button_post_handler(req);
     }
     return ESP_ERR_NOT_FOUND;
