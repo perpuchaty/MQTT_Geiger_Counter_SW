@@ -1084,6 +1084,11 @@ bool wifi_is_connected(void)
     return s_sta_got_ip;
 }
 
+bool wifi_is_bluetooth_connected(void)
+{
+    return s_ble_connected;
+}
+
 bool wifi_has_credentials(void)
 {
     wifi_config_t cfg;

@@ -47,13 +47,13 @@ extern "C" {
  * LCD - ST7565P over hardware SPI (u8g2, full framebuffer mode)
  * ---------------------------------------------------------------------- */
 #define LCD_SPI_HOST            SPI2_HOST          /* GPSPI2: the only general purpose host on C6 */
-#define LCD_SPI_CLOCK_HZ        (10 * 1000 * 1000)
+#define LCD_SPI_CLOCK_HZ        (1 * 1000 * 1000)
 #define LCD_SPI_MODE            0
 #define LCD_WIDTH               128
 #define LCD_HEIGHT              64
-#define LCD_U8G2_SETUP          u8g2_Setup_st7565_erc12864_f
+#define LCD_U8G2_SETUP          u8g2_Setup_st7565_erc12864_alt_f
 #define LCD_U8G2_ROTATION       U8G2_R0
-#define LCD_CONTRAST_DEFAULT    140
+#define LCD_CONTRAST_DEFAULT    32              /* tune for the fitted LCD panel */
 
 /* -------------------------------------------------------------------------
  * PWM (LEDC). ESP32-C6 only implements the low speed mode.
@@ -78,7 +78,8 @@ extern "C" {
 #define PWM_BUZZER_TIMER        LEDC_TIMER_2
 #define PWM_BUZZER_CHANNEL      LEDC_CHANNEL_2
 #define PWM_BUZZER_RES          LEDC_TIMER_10_BIT
-#define PWM_BUZZER_FREQ_HZ      2700
+#define PWM_BUZZER_FREQ_HZ      2500
+#define GEIGER_TICK_DURATION_US 1000
 
 /* -------------------------------------------------------------------------
  * ADC - continuous (DMA) mode with hardware calibration

@@ -1,5 +1,6 @@
 idf_component_register(SRCS "config.c"
                             "main.c"
+                            "lcd.c"
                             "geiger.c"
                             "history_store.c"
                             "settings.c"

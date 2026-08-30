@@ -51,6 +51,9 @@ wifi_prov_method_t wifi_prov_running(void);
 /** True once the station got an IP address. */
 bool wifi_is_connected(void);
 
+/** True while a BluFi client is connected over Bluetooth LE. */
+bool wifi_is_bluetooth_connected(void);
+
 /** True when credentials are stored in NVS. */
 bool wifi_has_credentials(void);
 
