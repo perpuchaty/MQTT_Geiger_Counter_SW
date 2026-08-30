@@ -65,8 +65,8 @@ extern "C" {
 #define PWM_TUBE_TIMER          LEDC_TIMER_0
 #define PWM_TUBE_CHANNEL        LEDC_CHANNEL_0
 #define PWM_TUBE_RES            LEDC_TIMER_10_BIT
-#define PWM_TUBE_FREQ_HZ        2000
-#define PWM_TUBE_STARTUP_DUTY_PCT 40.0f
+#define PWM_TUBE_FREQ_HZ        1000
+#define PWM_TUBE_STARTUP_DUTY_PCT 30.0f
 #define PWM_TUBE_DUTY_MAX_PCT   50.0f              /* hard limit, protects inductor and FET */
 
 /* LCD backlight */

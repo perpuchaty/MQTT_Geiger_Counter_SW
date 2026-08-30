@@ -73,6 +73,20 @@ typedef struct {
 
 static QueueHandle_t s_button_events;
 
+static const char *button_name(board_input_t input)
+{
+    switch (input) {
+    case BOARD_IN_BTN_ENTER:
+        return "ENTER";
+    case BOARD_IN_BTN_LEFT:
+        return "LEFT";
+    case BOARD_IN_BTN_RIGHT:
+        return "RIGHT";
+    default:
+        return "UNKNOWN";
+    }
+}
+
 esp_err_t button_simulate(board_input_t input)
 {
     ESP_RETURN_ON_FALSE(s_button_events, ESP_ERR_INVALID_STATE, TAG, "button queue not ready");
@@ -105,11 +119,8 @@ static void button_event_task(void *arg)
 
     for (;;) {
         xQueueReceive(s_button_events, &event, portMAX_DELAY);
-        ESP_LOGI(TAG, "button %d %s; state: L=%s E=%s R=%s", event.input,
-             event.level ? "released" : "pressed",
-             board_input_level(BOARD_IN_BTN_LEFT) ? "released" : "pressed",
-             board_input_level(BOARD_IN_BTN_ENTER) ? "released" : "pressed",
-             board_input_level(BOARD_IN_BTN_RIGHT) ? "released" : "pressed");
+           ESP_LOGI(TAG, "button %s %s", button_name(event.input),
+                  event.level ? "released" : "pressed");
         lcd_handle_button(event.input, !event.level);
     }
 }

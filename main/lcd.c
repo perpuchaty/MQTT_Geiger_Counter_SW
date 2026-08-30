@@ -21,6 +21,7 @@ typedef enum {
     LCD_SCREEN_WIFI,
     LCD_SCREEN_MQTT,
     LCD_SCREEN_TUBE,
+    LCD_SCREEN_HV,
 } lcd_screen_t;
 
 static volatile lcd_screen_t s_screen = LCD_SCREEN_MAIN;
@@ -28,6 +29,8 @@ static uint8_t s_menu_item;
 static uint8_t s_tube_field;
 static bool s_tube_editing;
 static settings_t s_tube_settings;
+static uint8_t s_hv_field;
+static bool s_hv_editing;
 
 static void backlight_fade_task(void *arg)
 {
@@ -97,6 +100,11 @@ static void draw_main_screen(void)
     u8g2_ClearBuffer(display);
     draw_bluetooth_icon(display, 3, 1, wifi_is_bluetooth_connected());
     draw_wifi_icon(display, 17, 1, wifi_is_connected());
+    if (board_hv_is_enabled()) {
+        u8g2_DrawFrame(display, 39, 1, 17, 11);
+        u8g2_SetFont(display, u8g2_font_5x7_tf);
+        u8g2_DrawStr(display, 42, 9, "HV");
+    }
 
     now = time(NULL);
     if (now > 1609459200 && localtime_r(&now, &local_time) != NULL) {
@@ -126,7 +134,7 @@ static void draw_main_screen(void)
 static void draw_menu_screen(void)
 {
     u8g2_t *display = board_lcd();
-    const char *items[] = { "Main screen", "Wi-Fi settings", "MQTT status", "Tube settings" };
+    const char *items[] = { "Main screen", "Wi-Fi settings", "MQTT status", "Tube settings", "High voltage" };
     const size_t item_count = sizeof(items) / sizeof(items[0]);
     const uint8_t first_item = s_menu_item < 2 ? 0 : s_menu_item - 1;
     const int item_y[] = { 29, 49 };
@@ -235,6 +243,48 @@ static void draw_tube_screen(void)
     u8g2_SendBuffer(display);
 }
 
+static void draw_hv_screen(void)
+{
+    u8g2_t *display = board_lcd();
+    char text[24];
+    int voltage_mv = 0;
+    const int row_y[] = { 25, 36, 47, 59 };
+
+    if (display == NULL) {
+        return;
+    }
+
+    board_tube_voltage_get_mv(&voltage_mv);
+    u8g2_ClearBuffer(display);
+    u8g2_SetFont(display, u8g2_font_6x10_tf);
+    u8g2_DrawStr(display, 4, 10, "HIGH VOLTAGE");
+    u8g2_DrawHLine(display, 0, 13, LCD_WIDTH);
+    u8g2_SetFont(display, u8g2_font_5x7_tf);
+    snprintf(text, sizeof(text), "ENABLE: %s", board_hv_is_enabled() ? "ON" : "OFF");
+    u8g2_DrawStr(display, 7, row_y[0], text);
+    snprintf(text, sizeof(text), "DUTY:   %u %%", (unsigned)(board_hv_duty_pct() + 0.5f));
+    u8g2_DrawStr(display, 7, row_y[1], text);
+    snprintf(text, sizeof(text), "FREQ:   %lu Hz", (unsigned long)board_hv_freq_hz());
+    u8g2_DrawStr(display, 7, row_y[2], text);
+    snprintf(text, sizeof(text), "TUBE:   %d V", (voltage_mv + 500) / 1000);
+    u8g2_DrawStr(display, 7, row_y[3], text);
+    u8g2_DrawFrame(display, 2, 15 + s_hv_field * 11, LCD_WIDTH - 4, 11);
+    if (s_hv_editing) {
+        u8g2_DrawBox(display, 120, 4, 4, 4);
+    }
+    u8g2_SendBuffer(display);
+}
+
+static void hv_adjust(int direction)
+{
+    if (s_hv_field == 1) {
+        board_hv_set_duty(board_hv_duty_pct() + direction);
+    } else if (s_hv_field == 2) {
+        int frequency = (int)board_hv_freq_hz() + direction * 100;
+        board_hv_set_freq(frequency < 100 ? 100 : (uint32_t)frequency);
+    }
+}
+
 static void tube_adjust(int direction)
 {
     if (s_tube_field == 0) {
@@ -277,16 +327,20 @@ void lcd_handle_button(board_input_t input, bool pressed)
                 s_screen = LCD_SCREEN_WIFI;
             } else if (s_menu_item == 2) {
                 s_screen = LCD_SCREEN_MQTT;
-            } else {
+            } else if (s_menu_item == 3) {
                 s_tube_settings = *settings_get();
                 s_tube_field = 0;
                 s_tube_editing = false;
                 s_screen = LCD_SCREEN_TUBE;
+            } else {
+                s_hv_field = 0;
+                s_hv_editing = false;
+                s_screen = LCD_SCREEN_HV;
             }
         } else if (input == BOARD_IN_BTN_LEFT) {
-            s_menu_item = s_menu_item == 0 ? 3 : s_menu_item - 1;
+            s_menu_item = s_menu_item == 0 ? 4 : s_menu_item - 1;
         } else if (input == BOARD_IN_BTN_RIGHT) {
-            s_menu_item = s_menu_item == 3 ? 0 : s_menu_item + 1;
+            s_menu_item = s_menu_item == 4 ? 0 : s_menu_item + 1;
         }
         break;
     case LCD_SCREEN_WIFI:
@@ -323,6 +377,29 @@ void lcd_handle_button(board_input_t input, bool pressed)
             }
         }
         break;
+    case LCD_SCREEN_HV:
+        if (input == BOARD_IN_BTN_ENTER) {
+            if (s_hv_field == 0) {
+                board_hv_set_enabled(!board_hv_is_enabled());
+            } else {
+                s_hv_editing = !s_hv_editing;
+            }
+        } else if (input == BOARD_IN_BTN_LEFT) {
+            if (s_hv_editing) {
+                hv_adjust(-1);
+            } else if (s_hv_field == 0) {
+                s_screen = LCD_SCREEN_MENU;
+            } else {
+                s_hv_field--;
+            }
+        } else if (input == BOARD_IN_BTN_RIGHT) {
+            if (s_hv_editing) {
+                hv_adjust(1);
+            } else if (s_hv_field < 2) {
+                s_hv_field++;
+            }
+        }
+        break;
     }
 }
 
@@ -344,6 +421,9 @@ static void main_screen_task(void *arg)
             break;
         case LCD_SCREEN_TUBE:
             draw_tube_screen();
+            break;
+        case LCD_SCREEN_HV:
+            draw_hv_screen();
             break;
         }
         vTaskDelay(pdMS_TO_TICKS(250));
