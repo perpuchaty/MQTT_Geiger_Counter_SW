@@ -168,10 +168,14 @@ void app_main(void)
     ESP_ERROR_CHECK(wifi_prov_init());
     ESP_ERROR_CHECK(mqtt_init());
 
+    wifi_prov_method_t provisioning = WIFI_PROV_BLUFI;
     if (!wifi_has_credentials()) {
-        ESP_ERROR_CHECK(wifi_prov_start(WIFI_PROV_BOTH));
+        provisioning |= WIFI_PROV_SOFTAP;
         ESP_LOGI(TAG, "provisioning: BluFi over BLE, or join \"%s\"", wifi_softap_ssid());
+    } else {
+        ESP_LOGI(TAG, "BluFi ready for Wi-Fi reconfiguration");
     }
+    ESP_ERROR_CHECK(wifi_prov_start(provisioning));
     ESP_ERROR_CHECK(lcd_start_main_screen());
 
     for (;;) {
