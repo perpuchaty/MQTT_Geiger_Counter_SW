@@ -21,7 +21,9 @@ typedef enum {
     LCD_SCREEN_WIFI,
     LCD_SCREEN_MQTT,
     LCD_SCREEN_TUBE,
+    LCD_SCREEN_TIME,
     LCD_SCREEN_HV,
+    LCD_SCREEN_LAMP_TEST,
 } lcd_screen_t;
 
 static volatile lcd_screen_t s_screen = LCD_SCREEN_MAIN;
@@ -29,8 +31,12 @@ static uint8_t s_menu_item;
 static uint8_t s_tube_field;
 static bool s_tube_editing;
 static settings_t s_tube_settings;
+static uint8_t s_time_field;
+static bool s_time_editing;
+static settings_t s_time_settings;
 static uint8_t s_hv_field;
 static bool s_hv_editing;
+static volatile bool s_lamp_test_active;
 
 static void backlight_fade_task(void *arg)
 {
@@ -134,7 +140,8 @@ static void draw_main_screen(void)
 static void draw_menu_screen(void)
 {
     u8g2_t *display = board_lcd();
-    const char *items[] = { "Main screen", "Wi-Fi settings", "MQTT status", "Tube settings", "High voltage" };
+    const char *items[] = { "Main screen", "Wi-Fi settings", "MQTT status", "Tube settings",
+                            "Time settings", "High voltage", "Lamp test" };
     const size_t item_count = sizeof(items) / sizeof(items[0]);
     const uint8_t first_item = s_menu_item < 2 ? 0 : s_menu_item - 1;
     const int item_y[] = { 29, 49 };
@@ -243,6 +250,33 @@ static void draw_tube_screen(void)
     u8g2_SendBuffer(display);
 }
 
+static void draw_time_screen(void)
+{
+    u8g2_t *display = board_lcd();
+    char text[28];
+    int offset_min = s_time_settings.timezone_offset_min;
+    int absolute_min = offset_min < 0 ? -offset_min : offset_min;
+    const int row_y[] = { 29, 45 };
+
+    if (display == NULL) {
+        return;
+    }
+
+    u8g2_ClearBuffer(display);
+    u8g2_SetFont(display, u8g2_font_6x10_tf);
+    u8g2_DrawStr(display, 4, 10, "TIME SETTINGS");
+    u8g2_DrawHLine(display, 0, 13, LCD_WIDTH);
+    u8g2_SetFont(display, u8g2_font_5x7_tf);
+    snprintf(text, sizeof(text), "UTC OFFSET: %c%02d:%02d", offset_min < 0 ? '-' : '+',
+             absolute_min / 60, absolute_min % 60);
+    u8g2_DrawStr(display, 7, row_y[0], text);
+    snprintf(text, sizeof(text), "SUMMER TIME: %s", s_time_settings.daylight_saving ? "ON" : "OFF");
+    u8g2_DrawStr(display, 7, row_y[1], text);
+    u8g2_DrawFrame(display, 2, 17 + s_time_field * 16, LCD_WIDTH - 4, 14);
+    u8g2_DrawStr(display, 4, 61, s_time_editing ? "L/R CHANGE  ENTER SAVE" : "L/R SELECT  ENTER EDIT");
+    u8g2_SendBuffer(display);
+}
+
 static void draw_hv_screen(void)
 {
     u8g2_t *display = board_lcd();
@@ -273,6 +307,38 @@ static void draw_hv_screen(void)
         u8g2_DrawBox(display, 120, 4, 4, 4);
     }
     u8g2_SendBuffer(display);
+}
+
+static void draw_lamp_test_screen(void)
+{
+    u8g2_t *display = board_lcd();
+    if (display == NULL) {
+        return;
+    }
+
+    u8g2_ClearBuffer(display);
+    if (s_lamp_test_active) {
+        u8g2_DrawBox(display, 0, 0, LCD_WIDTH, LCD_HEIGHT);
+    } else {
+        u8g2_SetFont(display, u8g2_font_6x10_tf);
+        u8g2_DrawStr(display, 4, 10, "LAMP TEST");
+        u8g2_DrawHLine(display, 0, 13, LCD_WIDTH);
+        u8g2_DrawStr(display, 22, 35, "HOLD ENTER");
+        u8g2_SetFont(display, u8g2_font_5x7_tf);
+        u8g2_DrawStr(display, 4, 61, "LEFT BACK");
+    }
+    u8g2_SendBuffer(display);
+}
+
+static void time_adjust(int direction)
+{
+    if (s_time_field == 0) {
+        int offset_min = s_time_settings.timezone_offset_min + direction * 30;
+        s_time_settings.timezone_offset_min = offset_min < TIMEZONE_OFFSET_MIN ? TIMEZONE_OFFSET_MIN :
+                                                offset_min > TIMEZONE_OFFSET_MAX ? TIMEZONE_OFFSET_MAX : offset_min;
+    } else {
+        s_time_settings.daylight_saving = !s_time_settings.daylight_saving;
+    }
 }
 
 static void hv_adjust(int direction)
@@ -307,6 +373,10 @@ static void tube_adjust(int direction)
 
 void lcd_handle_button(board_input_t input, bool pressed)
 {
+    if (s_screen == LCD_SCREEN_LAMP_TEST && input == BOARD_IN_BTN_ENTER) {
+        s_lamp_test_active = pressed;
+        return;
+    }
     if (!pressed) {
         return;
     }
@@ -332,15 +402,23 @@ void lcd_handle_button(board_input_t input, bool pressed)
                 s_tube_field = 0;
                 s_tube_editing = false;
                 s_screen = LCD_SCREEN_TUBE;
-            } else {
+            } else if (s_menu_item == 4) {
+                s_time_settings = *settings_get();
+                s_time_field = 0;
+                s_time_editing = false;
+                s_screen = LCD_SCREEN_TIME;
+            } else if (s_menu_item == 5) {
                 s_hv_field = 0;
                 s_hv_editing = false;
                 s_screen = LCD_SCREEN_HV;
+            } else {
+                s_lamp_test_active = true;
+                s_screen = LCD_SCREEN_LAMP_TEST;
             }
         } else if (input == BOARD_IN_BTN_LEFT) {
-            s_menu_item = s_menu_item == 0 ? 4 : s_menu_item - 1;
+            s_menu_item = s_menu_item == 0 ? 6 : s_menu_item - 1;
         } else if (input == BOARD_IN_BTN_RIGHT) {
-            s_menu_item = s_menu_item == 4 ? 0 : s_menu_item + 1;
+            s_menu_item = s_menu_item == 6 ? 0 : s_menu_item + 1;
         }
         break;
     case LCD_SCREEN_WIFI:
@@ -377,6 +455,30 @@ void lcd_handle_button(board_input_t input, bool pressed)
             }
         }
         break;
+    case LCD_SCREEN_TIME:
+        if (input == BOARD_IN_BTN_ENTER) {
+            if (s_time_editing) {
+                settings_save(&s_time_settings);
+                s_time_editing = false;
+            } else {
+                s_time_editing = true;
+            }
+        } else if (input == BOARD_IN_BTN_LEFT) {
+            if (s_time_editing) {
+                time_adjust(-1);
+            } else if (s_time_field == 0) {
+                s_screen = LCD_SCREEN_MENU;
+            } else {
+                s_time_field--;
+            }
+        } else if (input == BOARD_IN_BTN_RIGHT) {
+            if (s_time_editing) {
+                time_adjust(1);
+            } else if (s_time_field < 1) {
+                s_time_field++;
+            }
+        }
+        break;
     case LCD_SCREEN_HV:
         if (input == BOARD_IN_BTN_ENTER) {
             if (s_hv_field == 0) {
@@ -400,7 +502,18 @@ void lcd_handle_button(board_input_t input, bool pressed)
             }
         }
         break;
+    case LCD_SCREEN_LAMP_TEST:
+        if (input == BOARD_IN_BTN_LEFT) {
+            s_lamp_test_active = false;
+            s_screen = LCD_SCREEN_MENU;
+        }
+        break;
     }
+}
+
+bool lcd_lamp_test_active(void)
+{
+    return s_lamp_test_active;
 }
 
 static void main_screen_task(void *arg)
@@ -422,8 +535,14 @@ static void main_screen_task(void *arg)
         case LCD_SCREEN_TUBE:
             draw_tube_screen();
             break;
+        case LCD_SCREEN_TIME:
+            draw_time_screen();
+            break;
         case LCD_SCREEN_HV:
             draw_hv_screen();
+            break;
+        case LCD_SCREEN_LAMP_TEST:
+            draw_lamp_test_screen();
             break;
         }
         vTaskDelay(pdMS_TO_TICKS(250));

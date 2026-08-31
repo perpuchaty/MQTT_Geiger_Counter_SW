@@ -627,6 +627,14 @@ static void json_get_u16(const cJSON *root, const char *key, uint16_t *dst)
     }
 }
 
+static void json_get_i16(const cJSON *root, const char *key, int16_t *dst)
+{
+    const cJSON *item = cJSON_GetObjectItem(root, key);
+    if (cJSON_IsNumber(item) && item->valuedouble >= INT16_MIN && item->valuedouble <= INT16_MAX) {
+        *dst = (int16_t)item->valuedouble;
+    }
+}
+
 static void json_get_u32(const cJSON *root, const char *key, uint32_t *dst)
 {
     const cJSON *item = cJSON_GetObjectItem(root, key);
@@ -677,6 +685,8 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
     cJSON_AddBoolToObject(root, "led_enabled", cfg->led_enabled);
     cJSON_AddNumberToObject(root, "lcd_brightness", cfg->lcd_brightness);
     cJSON_AddBoolToObject(root, "lcd_auto_dim", cfg->lcd_auto_dim);
+    cJSON_AddNumberToObject(root, "timezone_offset_min", cfg->timezone_offset_min);
+    cJSON_AddBoolToObject(root, "daylight_saving", cfg->daylight_saving);
     cJSON_AddNumberToObject(root, "history_short_window_s", cfg->history_short_window_s);
     return send_json(req, root);
 }
@@ -719,6 +729,8 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
     json_get_bool(root, "led_enabled", &cfg.led_enabled);
     json_get_u8(root, "lcd_brightness", &cfg.lcd_brightness);
     json_get_bool(root, "lcd_auto_dim", &cfg.lcd_auto_dim);
+    json_get_i16(root, "timezone_offset_min", &cfg.timezone_offset_min);
+    json_get_bool(root, "daylight_saving", &cfg.daylight_saving);
     json_get_u32(root, "history_short_window_s", &cfg.history_short_window_s);
     cJSON_Delete(root);
 

@@ -1,7 +1,10 @@
 #include "settings.h"
 
 #include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "esp_check.h"
 #include "esp_log.h"
@@ -14,6 +17,7 @@ static const char *TAG = "settings";
 typedef enum {
     T_BOOL,
     T_U8,
+    T_I16,
     T_U16,
     T_U32,
     T_FLOAT,
@@ -51,6 +55,8 @@ static const setting_desc_t s_desc[] = {
     S_FIELD("led_en",     T_BOOL,  led_enabled),
     S_FIELD("lcd_bri",    T_U8,    lcd_brightness),
     S_FIELD("lcd_dim",    T_BOOL,  lcd_auto_dim),
+    S_FIELD("tz_offset",  T_I16,   timezone_offset_min),
+    S_FIELD("tz_dst",     T_BOOL,  daylight_saving),
     S_FIELD("hist_win",   T_U32,   history_short_window_s),
 };
 
@@ -127,6 +133,23 @@ static void settings_clamp(settings_t *c)
     if (c->spk_sound >= SOUND_TYPE_COUNT) {
         c->spk_sound = SOUND_NORMAL;
     }
+    if (c->timezone_offset_min < TIMEZONE_OFFSET_MIN) {
+        c->timezone_offset_min = TIMEZONE_OFFSET_MIN;
+    } else if (c->timezone_offset_min > TIMEZONE_OFFSET_MAX) {
+        c->timezone_offset_min = TIMEZONE_OFFSET_MAX;
+    }
+    c->timezone_offset_min = (c->timezone_offset_min / 30) * 30;
+}
+
+static void settings_apply_timezone(void)
+{
+    int offset_min = s_cfg.timezone_offset_min + (s_cfg.daylight_saving ? 60 : 0);
+    int absolute_min = offset_min < 0 ? -offset_min : offset_min;
+    char tz[20];
+    snprintf(tz, sizeof(tz), "UTC%c%d:%02d", offset_min > 0 ? '-' : '+',
+             absolute_min / 60, absolute_min % 60);
+    setenv("TZ", tz, 1);
+    tzset();
 }
 
 static void log_field(const char *action, const setting_desc_t *d, const void *field)
@@ -137,6 +160,9 @@ static void log_field(const char *action, const setting_desc_t *d, const void *f
         break;
     case T_U8:
         ESP_LOGI(TAG, "%s %-9s = %u", action, d->key, (unsigned)*(const uint8_t *)field);
+        break;
+    case T_I16:
+        ESP_LOGI(TAG, "%s %-9s = %d", action, d->key, (int)*(const int16_t *)field);
         break;
     case T_U16:
         ESP_LOGI(TAG, "%s %-9s = %u", action, d->key, (unsigned)*(const uint16_t *)field);
@@ -187,6 +213,9 @@ static int settings_load(nvs_handle_t nvs, settings_t *c)
         case T_U8:
             err = nvs_get_u8(nvs, d->key, (uint8_t *)field);
             break;
+        case T_I16:
+            err = nvs_get_i16(nvs, d->key, (int16_t *)field);
+            break;
         case T_U16:
             err = nvs_get_u16(nvs, d->key, (uint16_t *)field);
             break;
@@ -231,6 +260,9 @@ static esp_err_t settings_store(nvs_handle_t nvs, const settings_t *c)
         case T_U8:
             err = nvs_set_u8(nvs, d->key, *(const uint8_t *)field);
             break;
+        case T_I16:
+            err = nvs_set_i16(nvs, d->key, *(const int16_t *)field);
+            break;
         case T_U16:
             err = nvs_set_u16(nvs, d->key, *(const uint16_t *)field);
             break;
@@ -262,6 +294,7 @@ esp_err_t settings_init(void)
     if (err == ESP_ERR_NVS_NOT_FOUND) {
         ESP_LOGI(TAG, "no stored settings, using compiled-in defaults");
         settings_dump("default", &s_cfg);
+        settings_apply_timezone();
         return ESP_OK;
     }
     ESP_RETURN_ON_ERROR(err, TAG, "nvs open");
@@ -272,6 +305,7 @@ esp_err_t settings_init(void)
 
     ESP_LOGI(TAG, "restored %d of %d keys from NVS", found, (int)(sizeof(s_desc) / sizeof(s_desc[0])));
     settings_dump("load ", &s_cfg);
+    settings_apply_timezone();
     return ESP_OK;
 }
 
@@ -295,6 +329,7 @@ esp_err_t settings_save(const settings_t *in)
     ESP_RETURN_ON_ERROR(err, TAG, "commit");
 
     s_cfg = cfg;
+    settings_apply_timezone();
     ESP_LOGI(TAG, "settings committed to NVS");
     return ESP_OK;
 }
@@ -312,6 +347,7 @@ esp_err_t settings_reset(void)
     ESP_RETURN_ON_ERROR(err, TAG, "erase");
 
     settings_defaults(&s_cfg);
+    settings_apply_timezone();
     ESP_LOGI(TAG, "settings erased, back to defaults");
     settings_dump("default", &s_cfg);
     return ESP_OK;

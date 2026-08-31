@@ -193,6 +193,9 @@ label output{float:right;color:#e6e6e6;font-variant-numeric:tabular-nums}
   <label class="row"><input type="checkbox" id="led_en"> Indicator LED</label>
   <label class="row"><input type="checkbox" id="chg_en"> Battery charging</label>
   <label class="row"><input type="checkbox" id="hv_start"> Generate high voltage at startup</label>
+  <label for="tz_offset">Standard/winter UTC offset (hours)</label>
+  <input id="tz_offset" type="number" min="-12" max="14" step="0.5">
+  <label class="row"><input type="checkbox" id="tz_dst"> Daylight saving time (+1 hour)</label>
   <button class="wide" id="devsave" type="button">Save</button>
   <button class="wide alt" id="restart" type="button">Reset device</button>
   <button class="wide danger" id="factoryreset" type="button">Factory reset device</button>
@@ -445,6 +448,8 @@ async function loadSettings(fill = true) {
     $('led_en').checked = s.led_enabled;
     $('chg_en').checked = s.batt_charge_en;
     $('hv_start').checked = s.hv_start_enabled;
+    $('tz_offset').value = String(s.timezone_offset_min / 60);
+    $('tz_dst').checked = s.daylight_saving;
     $('livewin').value = String(s.history_short_window_s || 300);
     sliders();
   } catch (e) { mqttMsg('Could not load settings'); }
@@ -519,7 +524,9 @@ $('devsave').onclick = () => post({
   lcd_auto_dim: $('lcd_dim').checked,
   led_enabled: $('led_en').checked,
   batt_charge_en: $('chg_en').checked,
-  hv_start_enabled: $('hv_start').checked
+  hv_start_enabled: $('hv_start').checked,
+  timezone_offset_min: Math.round(Number($('tz_offset').value) * 60),
+  daylight_saving: $('tz_dst').checked
 }, 'devsave', 'devmsg');
 
 async function deviceAction(url, button, prompt) {

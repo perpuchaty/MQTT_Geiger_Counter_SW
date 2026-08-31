@@ -29,6 +29,8 @@ extern "C" {
 #define TUBE_CPM_MAX        10000.0f
 #define HISTORY_SHORT_MIN_S 60
 #define HISTORY_SHORT_MAX_S 1728000
+#define TIMEZONE_OFFSET_MIN  (-12 * 60)
+#define TIMEZONE_OFFSET_MAX  (14 * 60)
 
 /** Click length emitted by the speaker on every tube pulse. */
 typedef enum {
@@ -71,6 +73,10 @@ typedef struct {
     bool     led_enabled;
     uint8_t  lcd_brightness;     /* 0-100 */
     bool     lcd_auto_dim;       /* dim the backlight when no button is pressed */
+
+    /* Local time */
+    int16_t  timezone_offset_min; /* standard/winter offset from UTC */
+    bool     daylight_saving;    /* manually add one hour */
 
     /* Web UI history preview on the Live tab */
     uint32_t history_short_window_s;

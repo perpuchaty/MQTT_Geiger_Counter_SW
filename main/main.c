@@ -66,7 +66,9 @@ static void tube_tick_task(void *arg)
 {
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        buzzer_click();
+        if (!lcd_lamp_test_active()) {
+            buzzer_click();
+        }
     }
 }
 
@@ -139,10 +141,21 @@ static void button_event_task(void *arg)
         xQueueReceive(s_button_events, &event, portMAX_DELAY);
         ESP_LOGI(TAG, "button %s %s", button_name(event.input),
                  event.level ? "released" : "pressed");
-        if (!event.level) {
+
+        bool lamp_test_was_active = lcd_lamp_test_active();
+        lcd_handle_button(event.input, !event.level);
+        bool lamp_test_is_active = lcd_lamp_test_active();
+
+        if (lamp_test_is_active) {
+            if (esp_timer_is_active(s_tick_stop_timer)) {
+                esp_timer_stop(s_tick_stop_timer);
+            }
+            board_buzzer_on(PWM_BUZZER_FREQ_HZ, 100);
+        } else if (lamp_test_was_active) {
+            board_buzzer_off();
+        } else if (!event.level) {
             buzzer_click();
         }
-        lcd_handle_button(event.input, !event.level);
     }
 }
 
