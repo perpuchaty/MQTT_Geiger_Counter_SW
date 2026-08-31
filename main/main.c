@@ -30,6 +30,28 @@ static void tick_stop_timer_cb(void *arg)
     board_buzzer_off();
 }
 
+static uint32_t buzzer_click_duration_us(void)
+{
+    switch ((sound_type_t)settings_get()->spk_sound) {
+    case SOUND_SHORT:
+        return BUZZER_CLICK_SHORT_MS * 1000;
+    case SOUND_LONG:
+        return BUZZER_CLICK_LONG_MS * 1000;
+    case SOUND_NORMAL:
+    default:
+        return BUZZER_CLICK_NORMAL_MS * 1000;
+    }
+}
+
+static void buzzer_click(void)
+{
+    board_buzzer_on(PWM_BUZZER_FREQ_HZ, settings_get()->spk_volume);
+    if (esp_timer_is_active(s_tick_stop_timer)) {
+        esp_timer_stop(s_tick_stop_timer);
+    }
+    esp_timer_start_once(s_tick_stop_timer, buzzer_click_duration_us());
+}
+
 static void tube_pulse_isr(board_input_t input, bool level, void *arg)
 {
     BaseType_t higher_priority_task_woken = pdFALSE;
@@ -44,12 +66,7 @@ static void tube_tick_task(void *arg)
 {
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        board_buzzer_on(PWM_BUZZER_FREQ_HZ, settings_get()->spk_volume);
-
-        if (esp_timer_is_active(s_tick_stop_timer)) {
-            esp_timer_stop(s_tick_stop_timer);
-        }
-        esp_timer_start_once(s_tick_stop_timer, GEIGER_TICK_DURATION_US);
+        buzzer_click();
     }
 }
 
@@ -120,8 +137,11 @@ static void button_event_task(void *arg)
 
     for (;;) {
         xQueueReceive(s_button_events, &event, portMAX_DELAY);
-           ESP_LOGI(TAG, "button %s %s", button_name(event.input),
-                  event.level ? "released" : "pressed");
+        ESP_LOGI(TAG, "button %s %s", button_name(event.input),
+                 event.level ? "released" : "pressed");
+        if (!event.level) {
+            buzzer_click();
+        }
         lcd_handle_button(event.input, !event.level);
     }
 }
@@ -163,8 +183,8 @@ void app_main(void)
     ESP_ERROR_CHECK(board_hv_set_enabled(settings_get()->hv_start_enabled));
     ESP_ERROR_CHECK(board_hv_regulator_start());
     ESP_ERROR_CHECK(lcd_backlight_init());
-    ESP_ERROR_CHECK(button_events_init());
     ESP_ERROR_CHECK(tube_tick_init());
+    ESP_ERROR_CHECK(button_events_init());
     lcd_draw_startup_screen();
     ESP_ERROR_CHECK(geiger_start());
     ESP_ERROR_CHECK(wifi_prov_init());

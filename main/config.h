@@ -83,7 +83,9 @@ extern "C" {
 #define PWM_BUZZER_CHANNEL      LEDC_CHANNEL_2
 #define PWM_BUZZER_RES          LEDC_TIMER_10_BIT
 #define PWM_BUZZER_FREQ_HZ      2500
-#define GEIGER_TICK_DURATION_US 1000
+#define BUZZER_CLICK_SHORT_MS    5
+#define BUZZER_CLICK_NORMAL_MS   20
+#define BUZZER_CLICK_LONG_MS     50
 
 /* -------------------------------------------------------------------------
  * ADC - continuous (DMA) mode with hardware calibration

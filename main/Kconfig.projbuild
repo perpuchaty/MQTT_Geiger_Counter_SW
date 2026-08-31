@@ -167,7 +167,7 @@ menu "Geiger Counter"
                 0 mutes the speaker.
 
         config GEIGER_SPK_SOUND
-            int "Click length: 0 short, 1 normal, 2 long"
+            int "Click length: 0 short (5 ms), 1 normal (20 ms), 2 long (50 ms)"
             range 0 2
             default 1
 
