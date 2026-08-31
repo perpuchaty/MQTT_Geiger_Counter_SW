@@ -91,7 +91,32 @@ typedef struct {
     bool          level;
 } button_event_t;
 
+#define POWER_OFF_HOLD_US (3ULL * 1000 * 1000)
+
 static QueueHandle_t s_button_events;
+static esp_timer_handle_t s_power_off_timer;
+
+static void power_off_timer_cb(void *arg)
+{
+    if (!board_input_level(BOARD_IN_BTN_ENTER)) {
+        ESP_LOGI(TAG, "Enter held for 3 seconds, releasing power latch");
+        board_set_latch(false);
+    }
+}
+
+static void power_off_hold_update(const button_event_t *event)
+{
+    if (event->input != BOARD_IN_BTN_ENTER) {
+        return;
+    }
+
+    if (esp_timer_is_active(s_power_off_timer)) {
+        esp_timer_stop(s_power_off_timer);
+    }
+    if (!event->level) {
+        esp_timer_start_once(s_power_off_timer, POWER_OFF_HOLD_US);
+    }
+}
 
 static const char *button_name(board_input_t input)
 {
@@ -141,6 +166,7 @@ static void button_event_task(void *arg)
         xQueueReceive(s_button_events, &event, portMAX_DELAY);
         ESP_LOGI(TAG, "button %s %s", button_name(event.input),
                  event.level ? "released" : "pressed");
+        power_off_hold_update(&event);
 
         bool lamp_test_was_active = lcd_lamp_test_active();
         lcd_handle_button(event.input, !event.level);
@@ -161,6 +187,13 @@ static void button_event_task(void *arg)
 
 static esp_err_t button_events_init(void)
 {
+    const esp_timer_create_args_t power_off_timer_args = {
+        .callback = power_off_timer_cb,
+        .name = "power_off_hold",
+    };
+
+    ESP_RETURN_ON_ERROR(esp_timer_create(&power_off_timer_args, &s_power_off_timer),
+                        TAG, "power off timer");
     s_button_events = xQueueCreate(16, sizeof(button_event_t));
     ESP_RETURN_ON_FALSE(s_button_events, ESP_ERR_NO_MEM, TAG, "button event queue");
     ESP_RETURN_ON_FALSE(xTaskCreate(button_event_task, "buttons", 2048, NULL, 5, NULL) == pdPASS,
