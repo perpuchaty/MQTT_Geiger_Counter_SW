@@ -67,7 +67,10 @@ extern "C" {
 #define PWM_TUBE_RES            LEDC_TIMER_10_BIT
 #define PWM_TUBE_FREQ_HZ        1000
 #define PWM_TUBE_STARTUP_DUTY_PCT 30.0f
-#define PWM_TUBE_DUTY_MAX_PCT   50.0f              /* hard limit, protects inductor and FET */
+#define PWM_TUBE_DUTY_MAX_PCT   35.0f              /* hard limit, protects inductor and FET */
+#define HV_REGULATOR_INTERVAL_MS 500
+#define HV_REGULATOR_STEP_PCT   1.0f
+#define HV_REGULATOR_DEADBAND_MV 5000
 
 /* LCD backlight */
 #define PWM_BACKLIGHT_TIMER     LEDC_TIMER_1
@@ -141,6 +144,7 @@ void board_simulate_tube_pulse(void);
 esp_err_t board_hv_set_duty(float duty_pct);
 esp_err_t board_hv_set_freq(uint32_t freq_hz);
 esp_err_t board_hv_set_enabled(bool enabled);
+esp_err_t board_hv_regulator_start(void);
 bool board_hv_is_enabled(void);
 float board_hv_duty_pct(void);
 uint32_t board_hv_freq_hz(void);

@@ -245,6 +245,36 @@ uint32_t board_hv_freq_hz(void)
     return s_hv_freq_hz;
 }
 
+static void hv_regulator_task(void *arg)
+{
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(HV_REGULATOR_INTERVAL_MS));
+        if (!board_hv_is_enabled()) {
+            continue;
+        }
+
+        int voltage_mv;
+        if (board_tube_voltage_get_mv(&voltage_mv) != ESP_OK) {
+            continue;
+        }
+
+        int target_mv = settings_get()->tube_target_v * 1000;
+        float duty_pct = board_hv_duty_pct();
+        if (voltage_mv < target_mv - HV_REGULATOR_DEADBAND_MV) {
+            board_hv_set_duty(duty_pct + HV_REGULATOR_STEP_PCT);
+        } else if (voltage_mv > target_mv + HV_REGULATOR_DEADBAND_MV) {
+            board_hv_set_duty(duty_pct - HV_REGULATOR_STEP_PCT);
+        }
+    }
+}
+
+esp_err_t board_hv_regulator_start(void)
+{
+    return xTaskCreate(hv_regulator_task, "hv_regulator", 2048, NULL, 5, NULL) == pdPASS
+               ? ESP_OK
+               : ESP_ERR_NO_MEM;
+}
+
 esp_err_t board_backlight_set(uint8_t duty_pct)
 {
     return pwm_apply(PWM_BACKLIGHT_CHANNEL, duty_from_pct(PWM_BACKLIGHT_RES, duty_pct));
