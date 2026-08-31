@@ -11,6 +11,7 @@
 #include "lcd.h"
 #include "mqtt.h"
 #include "nvs_flash.h"
+#include "ota.h"
 #include "settings.h"
 #include "wifi_prov.h"
 
@@ -153,6 +154,7 @@ void app_main(void)
     nvs_bringup();
     ESP_ERROR_CHECK(settings_init());   /* everything below reads settings_get() */
     ESP_ERROR_CHECK(history_store_init());
+    ESP_ERROR_CHECK(ota_init());
 
     ESP_ERROR_CHECK(board_init());
     board_apply_settings();

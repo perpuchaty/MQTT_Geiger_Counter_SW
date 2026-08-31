@@ -6,6 +6,7 @@ idf_component_register(SRCS "config.c"
                             "history_store.c"
                             "settings.c"
                             "mqtt.c"
+                            "ota.c"
                             "wifi_prov.c"
                             "blufi_init.c"
                             "blufi_security.c"
@@ -25,4 +26,5 @@ idf_component_register(SRCS "config.c"
                              bt
                              spiffs
                              app_update
+                             esp_https_ota
                     PRIV_REQUIRES mbedtls)

@@ -76,6 +76,18 @@ menu "Geiger Counter"
 
     endmenu
 
+    menu "Firmware update"
+
+        config GEIGER_OTA_URL
+            string "OTA firmware image URL"
+            default ""
+            help
+                Direct HTTP or HTTPS URL of the application .bin image. The
+                device checks this image whenever Wi-Fi obtains an IP address.
+                Leave empty to disable OTA checks.
+
+    endmenu
+
     menu "MQTT / Home Assistant"
 
         comment "Defaults only, every value can be changed from the web UI"

@@ -28,6 +28,7 @@
 #include "mdns.h"
 #include "mqtt.h"
 #include "nvs_flash.h"
+#include "ota.h"
 #include "settings.h"
 #include "soc/soc_caps.h"
 #include "esp_sntp.h"
@@ -182,6 +183,7 @@ static void ip_event_handler(void *arg, esp_event_base_t base, int32_t id, void 
     ESP_LOGI(TAG, "got ip " IPSTR ", web ui on http://" WIFI_MDNS_HOSTNAME ".local",
              IP2STR(&((ip_event_got_ip_t *)data)->ip_info.ip));
     time_sync_start();
+    ota_check_on_connect();
 
     /* Give the portal client a moment to follow the redirect, then drop the SoftAP. */
     if (WIFI_PORTAL_LINGER_MS > 0 && (s_running & WIFI_PROV_SOFTAP) && s_portal_timer &&
