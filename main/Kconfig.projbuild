@@ -160,11 +160,12 @@ menu "Geiger Counter"
         comment "Defaults only, every value can be changed from the web UI"
 
         config GEIGER_SPK_VOLUME
-            int "Speaker volume (%)"
-            range 0 100
+            int "Buzzer duty level (100 is loudest)"
+            range 0 200
             default 60
             help
-                0 mutes the speaker.
+                Maps 0..200 to 0..100 percent PWM duty. A passive buzzer is
+                loudest at level 100, which produces a 50 percent duty cycle.
 
         config GEIGER_SPK_SOUND
             int "Click length: 0 short (5 ms), 1 normal (20 ms), 2 long (50 ms)"

@@ -280,12 +280,16 @@ esp_err_t board_backlight_set(uint8_t duty_pct)
     return pwm_apply(PWM_BACKLIGHT_CHANNEL, duty_from_pct(PWM_BACKLIGHT_RES, duty_pct));
 }
 
-esp_err_t board_buzzer_on(uint32_t freq_hz, uint8_t duty_pct)
+esp_err_t board_buzzer_on(uint32_t freq_hz, uint8_t duty_level)
 {
     if (freq_hz) {
         ESP_RETURN_ON_ERROR(ledc_set_freq(PWM_SPEED_MODE, PWM_BUZZER_TIMER, freq_hz), TAG, "buzzer freq");
     }
-    return pwm_apply(PWM_BUZZER_CHANNEL, duty_from_pct(PWM_BUZZER_RES, duty_pct));
+    if (duty_level > 200) {
+        duty_level = 200;
+    }
+    return pwm_apply(PWM_BUZZER_CHANNEL,
+                     duty_from_pct(PWM_BUZZER_RES, duty_level / 2.0f));
 }
 
 esp_err_t board_buzzer_off(void)

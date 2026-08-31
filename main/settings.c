@@ -118,8 +118,8 @@ static void settings_clamp(settings_t *c)
     } else if (c->tube_cpm_per_usvh > TUBE_CPM_MAX) {
         c->tube_cpm_per_usvh = TUBE_CPM_MAX;
     }
-    if (c->spk_volume > 100) {
-        c->spk_volume = 100;
+    if (c->spk_volume > 200) {
+        c->spk_volume = 200;
     }
     if (c->lcd_brightness > 100) {
         c->lcd_brightness = 100;

@@ -58,7 +58,7 @@ typedef struct {
     uint16_t tube_target_v;      /* HV target the boost converter regulates to */
 
     /* Speaker */
-    uint8_t  spk_volume;         /* 0-100, 0 mutes */
+    uint8_t  spk_volume;         /* 0-200 PWM scale, loudest at 100 */
     uint8_t  spk_sound;          /* sound_type_t */
 
     /* Power */

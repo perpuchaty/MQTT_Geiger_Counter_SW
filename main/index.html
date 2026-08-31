@@ -179,8 +179,8 @@ label output{float:right;color:#e6e6e6;font-variant-numeric:tabular-nums}
 </section>
 
 <section id="device">
-  <label for="spk_vol">Speaker volume <output id="spk_vol_v"></output></label>
-  <input id="spk_vol" type="range" min="0" max="100">
+  <label for="spk_vol">Buzzer duty <output id="spk_vol_v"></output></label>
+  <input id="spk_vol" type="range" min="0" max="200" step="1">
   <label for="spk_snd">Click length</label>
   <select id="spk_snd">
     <option value="0">Short (5 ms)</option>
@@ -466,7 +466,7 @@ async function post(body, btn, out) {
 }
 
 function sliders() {
-  $('spk_vol_v').textContent = $('spk_vol').value + '%';
+  $('spk_vol_v').textContent = $('spk_vol').value + ' / 200';
   $('lcd_bri_v').textContent = $('lcd_bri').value + '%';
 }
 $('spk_vol').oninput = sliders;

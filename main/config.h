@@ -151,7 +151,7 @@ bool board_hv_is_enabled(void);
 float board_hv_duty_pct(void);
 uint32_t board_hv_freq_hz(void);
 esp_err_t board_backlight_set(uint8_t duty_pct);
-esp_err_t board_buzzer_on(uint32_t freq_hz, uint8_t duty_pct);
+esp_err_t board_buzzer_on(uint32_t freq_hz, uint8_t duty_level);
 esp_err_t board_buzzer_off(void);
 
 /* ADC, values are refreshed continuously in the background */
