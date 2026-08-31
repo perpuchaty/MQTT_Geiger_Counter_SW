@@ -5,6 +5,7 @@
 
 #include "config.h"
 #include "esp_check.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "geiger.h"
@@ -14,12 +15,17 @@
 
 static const char *TAG = "lcd";
 static volatile uint8_t s_backlight_target;
+static volatile int64_t s_last_activity_us;
+
+#define LCD_AUTO_DIM_DELAY_US (30LL * 1000000LL)
+#define LCD_MENU_ITEM_COUNT   8
 
 typedef enum {
     LCD_SCREEN_MAIN,
     LCD_SCREEN_MENU,
     LCD_SCREEN_WIFI,
     LCD_SCREEN_MQTT,
+    LCD_SCREEN_SYSTEM,
     LCD_SCREEN_TUBE,
     LCD_SCREEN_TIME,
     LCD_SCREEN_HV,
@@ -28,6 +34,9 @@ typedef enum {
 
 static volatile lcd_screen_t s_screen = LCD_SCREEN_MAIN;
 static uint8_t s_menu_item;
+static uint8_t s_system_field;
+static bool s_system_editing;
+static settings_t s_system_settings;
 static uint8_t s_tube_field;
 static bool s_tube_editing;
 static settings_t s_tube_settings;
@@ -44,6 +53,11 @@ static void backlight_fade_task(void *arg)
 
     for (;;) {
         uint8_t target = s_backlight_target;
+        const settings_t *settings = settings_get();
+        if (settings->lcd_auto_dim &&
+            esp_timer_get_time() - s_last_activity_us >= LCD_AUTO_DIM_DELAY_US) {
+            target = target == 0 ? 0 : (target < 10 ? 1 : target / 10);
+        }
         if (brightness < target) {
             brightness++;
             board_backlight_set(brightness);
@@ -58,6 +72,7 @@ static void backlight_fade_task(void *arg)
 esp_err_t lcd_backlight_init(void)
 {
     s_backlight_target = 0;
+    s_last_activity_us = esp_timer_get_time();
     ESP_RETURN_ON_ERROR(board_backlight_set(0), TAG, "backlight off");
     ESP_RETURN_ON_FALSE(xTaskCreate(backlight_fade_task, "backlight", 2048, NULL, 4, NULL) == pdPASS,
                         ESP_ERR_NO_MEM, TAG, "backlight task");
@@ -140,8 +155,8 @@ static void draw_main_screen(void)
 static void draw_menu_screen(void)
 {
     u8g2_t *display = board_lcd();
-    const char *items[] = { "Main screen", "Wi-Fi settings", "MQTT status", "Tube settings",
-                            "Time settings", "High voltage", "Lamp test" };
+    const char *items[] = { "Main screen", "Wi-Fi settings", "MQTT status", "System settings",
+                            "Tube settings", "Time settings", "High voltage", "Lamp test" };
     const size_t item_count = sizeof(items) / sizeof(items[0]);
     const uint8_t first_item = s_menu_item < 2 ? 0 : s_menu_item - 1;
     const int item_y[] = { 29, 49 };
@@ -169,6 +184,42 @@ static void draw_menu_screen(void)
     u8g2_DrawFrame(display, LCD_WIDTH - 8, scrollbar_y, 5, scrollbar_h);
     u8g2_DrawBox(display, LCD_WIDTH - 7, thumb_y + 1, 3, thumb_h - 2);
     u8g2_SetFont(display, u8g2_font_5x7_tf);
+    u8g2_SendBuffer(display);
+}
+
+static const char *sound_name(uint8_t sound)
+{
+    static const char *names[] = { "SHORT", "NORMAL", "LONG" };
+    return sound < SOUND_TYPE_COUNT ? names[sound] : "NORMAL";
+}
+
+static void draw_system_screen(void)
+{
+    u8g2_t *display = board_lcd();
+    char text[24];
+    const int row_y[] = { 24, 35, 46, 57 };
+
+    if (display == NULL) {
+        return;
+    }
+
+    u8g2_ClearBuffer(display);
+    u8g2_SetFont(display, u8g2_font_6x10_tf);
+    u8g2_DrawStr(display, 4, 10, "SYSTEM SETTINGS");
+    u8g2_DrawHLine(display, 0, 13, LCD_WIDTH);
+    u8g2_SetFont(display, u8g2_font_5x7_tf);
+    snprintf(text, sizeof(text), "SOUND:      %s", sound_name(s_system_settings.spk_sound));
+    u8g2_DrawStr(display, 7, row_y[0], text);
+    snprintf(text, sizeof(text), "VOLUME:     %u", s_system_settings.spk_volume);
+    u8g2_DrawStr(display, 7, row_y[1], text);
+    snprintf(text, sizeof(text), "BRIGHTNESS: %u %%", s_system_settings.lcd_brightness);
+    u8g2_DrawStr(display, 7, row_y[2], text);
+    snprintf(text, sizeof(text), "AUTO DIM:   %s", s_system_settings.lcd_auto_dim ? "ON" : "OFF");
+    u8g2_DrawStr(display, 7, row_y[3], text);
+    u8g2_DrawFrame(display, 2, 15 + s_system_field * 11, LCD_WIDTH - 4, 11);
+    if (s_system_editing) {
+        u8g2_DrawBox(display, 120, 4, 4, 4);
+    }
     u8g2_SendBuffer(display);
 }
 
@@ -371,6 +422,24 @@ static void tube_adjust(int direction)
     }
 }
 
+static void system_adjust(int direction)
+{
+    if (s_system_field == 0) {
+        int sound = s_system_settings.spk_sound + direction;
+        s_system_settings.spk_sound = sound < 0 ? SOUND_TYPE_COUNT - 1 :
+                                              sound >= SOUND_TYPE_COUNT ? SOUND_SHORT : sound;
+    } else if (s_system_field == 1) {
+        int volume = s_system_settings.spk_volume + direction * 10;
+        s_system_settings.spk_volume = volume < 0 ? 0 : volume > 200 ? 200 : volume;
+    } else if (s_system_field == 2) {
+        int brightness = s_system_settings.lcd_brightness + direction * 5;
+        s_system_settings.lcd_brightness = brightness < 0 ? 0 : brightness > 100 ? 100 : brightness;
+        lcd_set_backlight(s_system_settings.lcd_brightness);
+    } else {
+        s_system_settings.lcd_auto_dim = !s_system_settings.lcd_auto_dim;
+    }
+}
+
 void lcd_handle_button(board_input_t input, bool pressed)
 {
     if (s_screen == LCD_SCREEN_LAMP_TEST && input == BOARD_IN_BTN_ENTER) {
@@ -380,6 +449,7 @@ void lcd_handle_button(board_input_t input, bool pressed)
     if (!pressed) {
         return;
     }
+    s_last_activity_us = esp_timer_get_time();
 
     switch (s_screen) {
     case LCD_SCREEN_MAIN:
@@ -398,16 +468,21 @@ void lcd_handle_button(board_input_t input, bool pressed)
             } else if (s_menu_item == 2) {
                 s_screen = LCD_SCREEN_MQTT;
             } else if (s_menu_item == 3) {
+                s_system_settings = *settings_get();
+                s_system_field = 0;
+                s_system_editing = false;
+                s_screen = LCD_SCREEN_SYSTEM;
+            } else if (s_menu_item == 4) {
                 s_tube_settings = *settings_get();
                 s_tube_field = 0;
                 s_tube_editing = false;
                 s_screen = LCD_SCREEN_TUBE;
-            } else if (s_menu_item == 4) {
+            } else if (s_menu_item == 5) {
                 s_time_settings = *settings_get();
                 s_time_field = 0;
                 s_time_editing = false;
                 s_screen = LCD_SCREEN_TIME;
-            } else if (s_menu_item == 5) {
+            } else if (s_menu_item == 6) {
                 s_hv_field = 0;
                 s_hv_editing = false;
                 s_screen = LCD_SCREEN_HV;
@@ -416,9 +491,9 @@ void lcd_handle_button(board_input_t input, bool pressed)
                 s_screen = LCD_SCREEN_LAMP_TEST;
             }
         } else if (input == BOARD_IN_BTN_LEFT) {
-            s_menu_item = s_menu_item == 0 ? 6 : s_menu_item - 1;
+            s_menu_item = s_menu_item == 0 ? LCD_MENU_ITEM_COUNT - 1 : s_menu_item - 1;
         } else if (input == BOARD_IN_BTN_RIGHT) {
-            s_menu_item = s_menu_item == 6 ? 0 : s_menu_item + 1;
+            s_menu_item = s_menu_item == LCD_MENU_ITEM_COUNT - 1 ? 0 : s_menu_item + 1;
         }
         break;
     case LCD_SCREEN_WIFI:
@@ -429,6 +504,32 @@ void lcd_handle_button(board_input_t input, bool pressed)
     case LCD_SCREEN_MQTT:
         if (input == BOARD_IN_BTN_LEFT) {
             s_screen = LCD_SCREEN_MENU;
+        }
+        break;
+    case LCD_SCREEN_SYSTEM:
+        if (input == BOARD_IN_BTN_ENTER) {
+            if (s_system_editing) {
+                if (settings_save(&s_system_settings) == ESP_OK) {
+                    lcd_set_backlight(settings_get()->lcd_brightness);
+                }
+                s_system_editing = false;
+            } else {
+                s_system_editing = true;
+            }
+        } else if (input == BOARD_IN_BTN_LEFT) {
+            if (s_system_editing) {
+                system_adjust(-1);
+            } else if (s_system_field == 0) {
+                s_screen = LCD_SCREEN_MENU;
+            } else {
+                s_system_field--;
+            }
+        } else if (input == BOARD_IN_BTN_RIGHT) {
+            if (s_system_editing) {
+                system_adjust(1);
+            } else if (s_system_field < 3) {
+                s_system_field++;
+            }
         }
         break;
     case LCD_SCREEN_TUBE:
@@ -531,6 +632,9 @@ static void main_screen_task(void *arg)
             break;
         case LCD_SCREEN_MQTT:
             draw_mqtt_screen();
+            break;
+        case LCD_SCREEN_SYSTEM:
+            draw_system_screen();
             break;
         case LCD_SCREEN_TUBE:
             draw_tube_screen();
