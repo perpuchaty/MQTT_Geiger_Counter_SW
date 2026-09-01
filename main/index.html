@@ -29,6 +29,13 @@ section.on{display:block}
 .chart .lbl select{background:#101418;color:#c4ccd4;border:1px solid #2a3138;border-radius:6px;font-size:.72rem;padding:.1rem .2rem}
 .card i{display:block;color:#8a949e;font-size:.75rem;font-style:normal;text-transform:uppercase;letter-spacing:.04em}
 .card b{font-size:1.2rem;font-weight:600;font-variant-numeric:tabular-nums}
+.diag-title{font-size:.82rem;text-transform:uppercase;letter-spacing:.04em;margin:1.2rem 0 .45rem;color:#aeb7c0}
+.table-wrap{overflow-x:auto;border:1px solid #2a3138;border-radius:8px}
+.diag-table{width:100%;border-collapse:collapse;font-size:.82rem;font-variant-numeric:tabular-nums}
+.diag-table th,.diag-table td{padding:.5rem .6rem;text-align:left;border-top:1px solid #2a3138;white-space:nowrap}
+.diag-table tr:first-child th{border-top:none}
+.diag-table th{color:#8a949e;font-size:.7rem;text-transform:uppercase;letter-spacing:.04em;background:#141a20}
+.diag-table td:last-child{white-space:normal}
 ul{list-style:none;margin:0 0 .8rem;padding:0;border:1px solid #2a3138;border-radius:10px;overflow:hidden}
 li{display:flex;justify-content:space-between;gap:.5rem;padding:.7rem .8rem;cursor:pointer;border-top:1px solid #2a3138}
 li:first-child{border-top:none}
@@ -209,10 +216,21 @@ label output{float:right;color:#e6e6e6;font-variant-numeric:tabular-nums}
 
 <section id="system">
   <div class="grid">
-    <div class="card"><i>Wi-Fi</i><b id="sysnet" style="font-size:1rem">--</b></div>
-    <div class="card"><i>Uptime</i><b id="uptime" style="font-size:1rem">--</b></div>
+    <div class="card"><i>CPU</i><b id="diagcpu">--</b></div>
+    <div class="card"><i>Uptime</i><b id="uptime">--</b></div>
+    <div class="card"><i>Free heap</i><b id="diagheap">--</b></div>
+    <div class="card"><i>Minimum heap</i><b id="diagheapmin">--</b></div>
+    <div class="card"><i>Tasks</i><b id="diagtasks">--</b></div>
+    <div class="card"><i>ESP-IDF</i><b id="diagidf" style="font-size:.9rem">--</b></div>
   </div>
-  <p class="soon">Display, logging and firmware update options will live here.</p>
+  <h2 class="diag-title">PWM outputs</h2>
+  <div class="table-wrap"><table class="diag-table" id="diagpwm"></table></div>
+  <h2 class="diag-title">ADC inputs</h2>
+  <div class="table-wrap"><table class="diag-table" id="diagadc"></table></div>
+  <h2 class="diag-title">GPIO state</h2>
+  <div class="table-wrap"><table class="diag-table" id="diaggpio"></table></div>
+  <button class="wide alt" id="diagrefresh" type="button" style="margin-top:.8rem">Refresh diagnostics</button>
+  <div id="diagmsg"></div>
 </section>
 </main>
 
@@ -226,6 +244,7 @@ function show(name) {
   location.hash = name;
   if (name === 'live') drawLiveChart();
   if (name === 'history') drawHistChart();
+  if (name === 'system') diagnostics();
 }
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => show(b.dataset.tab));
 
@@ -355,13 +374,78 @@ async function status() {
     $('host').textContent = s.connected
       ? s.ssid + ' \u00b7 ' + s.ip + ' \u00b7 http://' + s.hostname + '.local'
       : (s.portal ? 'Setup mode \u2013 not connected' : 'Not connected');
-    $('sysnet').textContent = s.connected ? s.ssid : 'offline';
     $('offline').classList.toggle('on', !s.connected);
     $('remembered').textContent = s.has_credentials ? s.remembered_ssid : 'None';
     $('forgetwifi').hidden = !s.has_credentials;
     return s;
   } catch (e) { return null; }
 }
+
+/* ---- system diagnostics ---- */
+const formatBytes = bytes => bytes >= 1048576
+  ? (bytes / 1048576).toFixed(2) + ' MB'
+  : (bytes / 1024).toFixed(1) + ' KB';
+
+function formatUptime(seconds) {
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor(seconds % 86400 / 3600);
+  const minutes = Math.floor(seconds % 3600 / 60);
+  return (days ? days + 'd ' : '') + hours + 'h ' + minutes + 'm';
+}
+
+function fillTable(id, headings, rows) {
+  const table = $(id);
+  table.replaceChildren();
+  const head = document.createElement('tr');
+  headings.forEach(text => {
+    const cell = document.createElement('th');
+    cell.textContent = text;
+    head.appendChild(cell);
+  });
+  table.appendChild(head);
+  rows.forEach(values => {
+    const row = document.createElement('tr');
+    values.forEach(value => {
+      const cell = document.createElement('td');
+      cell.textContent = value;
+      row.appendChild(cell);
+    });
+    table.appendChild(row);
+  });
+}
+
+async function diagnostics() {
+  $('diagrefresh').disabled = true;
+  $('diagmsg').textContent = 'Reading hardware...';
+  try {
+    const response = await fetch('/api/diagnostics', { cache: 'no-store' });
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    const d = await response.json();
+    $('diagcpu').textContent = d.cpu_freq_mhz + ' MHz / ' + d.cores + ' core' + (d.cores === 1 ? '' : 's');
+    $('uptime').textContent = formatUptime(d.uptime_s);
+    $('diagheap').textContent = formatBytes(d.heap_free);
+    $('diagheapmin').textContent = formatBytes(d.heap_min);
+    $('diagtasks').textContent = d.tasks;
+    $('diagidf').textContent = d.idf_version;
+    fillTable('diagpwm', ['Output', 'GPIO', 'Frequency', 'Duty'], d.pwm.map(p => [
+      p.name, p.gpio, p.freq_hz == null ? '--' : p.freq_hz + ' Hz',
+      p.duty_pct == null ? '--' : p.duty_pct.toFixed(1) + '%'
+    ]));
+    fillTable('diagadc', ['Input', 'GPIO', 'Raw', 'Voltage'], d.adc.map(a => [
+      a.name, a.gpio, a.raw == null ? '--' : a.raw,
+      a.mv == null ? '--' : a.mv + ' mV'
+    ]));
+    fillTable('diaggpio', ['GPIO', 'Direction', 'Level', 'Role'], d.gpios.map(g => [
+      g.gpio, g.direction || '--', g.level, g.role
+    ]));
+      $('diagmsg').textContent = 'Live hardware state; reset reason ' + d.reset_reason;
+  } catch (e) {
+    $('diagmsg').textContent = 'Diagnostics unavailable: ' + e.message;
+  }
+  $('diagrefresh').disabled = false;
+}
+
+$('diagrefresh').onclick = diagnostics;
 
 /* ---- wi-fi tab ---- */
 async function scan() {
@@ -591,6 +675,7 @@ $('histwin').onchange = historyLong;
   setInterval(historyShort, 10000);
   setInterval(status, 10000);
   setInterval(() => { if ($('mqtt').classList.contains('on')) loadSettings(false); }, 5000);
+  setInterval(() => { if ($('system').classList.contains('on')) diagnostics(); }, 5000);
 })();
 </script>
 </body>
