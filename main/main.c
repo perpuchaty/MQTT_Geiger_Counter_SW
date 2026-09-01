@@ -28,6 +28,7 @@ static void tube_tick_notify(void)
 static void tick_stop_timer_cb(void *arg)
 {
     board_buzzer_off();
+    board_set_led(false);
 }
 
 static uint32_t buzzer_click_duration_us(void)
@@ -52,6 +53,27 @@ static void buzzer_click(void)
     esp_timer_start_once(s_tick_stop_timer, buzzer_click_duration_us());
 }
 
+static void tube_pulse_feedback(void)
+{
+    bool feedback_active = false;
+
+    if (!lcd_lamp_test_active()) {
+        board_buzzer_on(PWM_BUZZER_FREQ_HZ, settings_get()->spk_volume);
+        feedback_active = true;
+    }
+    if (settings_get()->led_enabled) {
+        board_set_led(true);
+        feedback_active = true;
+    }
+    if (!feedback_active) {
+        return;
+    }
+    if (esp_timer_is_active(s_tick_stop_timer)) {
+        esp_timer_stop(s_tick_stop_timer);
+    }
+    esp_timer_start_once(s_tick_stop_timer, buzzer_click_duration_us());
+}
+
 static void tube_pulse_isr(board_input_t input, bool level, void *arg)
 {
     BaseType_t higher_priority_task_woken = pdFALSE;
@@ -66,9 +88,7 @@ static void tube_tick_task(void *arg)
 {
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        if (!lcd_lamp_test_active()) {
-            buzzer_click();
-        }
+        tube_pulse_feedback();
     }
 }
 

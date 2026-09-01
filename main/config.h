@@ -121,6 +121,18 @@ typedef enum {
 /** Called from ISR context: keep it short and ISR safe. */
 typedef void (*board_input_isr_t)(board_input_t input, bool level, void *arg);
 
+typedef enum {
+    BOARD_PWM_TUBE = 0,
+    BOARD_PWM_LCD,
+    BOARD_PWM_BUZZER,
+    BOARD_PWM_COUNT,
+} board_pwm_t;
+
+typedef struct {
+    uint32_t freq_hz;
+    float duty_pct;
+} board_pwm_status_t;
+
 /* -------------------------------------------------------------------------
  * API
  * ---------------------------------------------------------------------- */
@@ -149,7 +161,9 @@ esp_err_t board_hv_set_enabled(bool enabled);
 esp_err_t board_hv_regulator_start(void);
 bool board_hv_is_enabled(void);
 float board_hv_duty_pct(void);
+float board_hv_output_duty_pct(void);
 uint32_t board_hv_freq_hz(void);
+esp_err_t board_pwm_get_status(board_pwm_t pwm, board_pwm_status_t *status);
 esp_err_t board_backlight_set(uint8_t duty_pct);
 esp_err_t board_buzzer_on(uint32_t freq_hz, uint8_t duty_level);
 esp_err_t board_buzzer_off(void);

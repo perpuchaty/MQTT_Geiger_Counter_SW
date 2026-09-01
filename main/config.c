@@ -149,7 +149,6 @@ void board_simulate_tube_pulse(void)
  * ====================================================================== */
 
 static float s_hv_duty_pct;
-static uint32_t s_hv_freq_hz = PWM_TUBE_FREQ_HZ;
 static bool s_hv_enabled;
 
 static uint32_t duty_from_pct(ledc_timer_bit_t res, float pct)
@@ -231,7 +230,6 @@ esp_err_t board_hv_set_freq(uint32_t freq_hz)
 {
     ESP_RETURN_ON_FALSE(freq_hz >= 100 && freq_hz <= 100000, ESP_ERR_INVALID_ARG, TAG, "hv frequency");
     ESP_RETURN_ON_ERROR(ledc_set_freq(PWM_SPEED_MODE, PWM_TUBE_TIMER, freq_hz), TAG, "hv frequency");
-    s_hv_freq_hz = freq_hz;
     return ESP_OK;
 }
 
@@ -240,9 +238,40 @@ float board_hv_duty_pct(void)
     return s_hv_duty_pct;
 }
 
+float board_hv_output_duty_pct(void)
+{
+    const uint32_t max_duty = (1u << (uint32_t)PWM_TUBE_RES) - 1u;
+    return ledc_get_duty(PWM_SPEED_MODE, PWM_TUBE_CHANNEL) * 100.0f / max_duty;
+}
+
 uint32_t board_hv_freq_hz(void)
 {
-    return s_hv_freq_hz;
+    return ledc_get_freq(PWM_SPEED_MODE, PWM_TUBE_TIMER);
+}
+
+esp_err_t board_pwm_get_status(board_pwm_t pwm, board_pwm_status_t *status)
+{
+    static const ledc_timer_t timers[BOARD_PWM_COUNT] = {
+        [BOARD_PWM_TUBE] = PWM_TUBE_TIMER,
+        [BOARD_PWM_LCD] = PWM_BACKLIGHT_TIMER,
+        [BOARD_PWM_BUZZER] = PWM_BUZZER_TIMER,
+    };
+    static const ledc_channel_t channels[BOARD_PWM_COUNT] = {
+        [BOARD_PWM_TUBE] = PWM_TUBE_CHANNEL,
+        [BOARD_PWM_LCD] = PWM_BACKLIGHT_CHANNEL,
+        [BOARD_PWM_BUZZER] = PWM_BUZZER_CHANNEL,
+    };
+    static const ledc_timer_bit_t resolutions[BOARD_PWM_COUNT] = {
+        [BOARD_PWM_TUBE] = PWM_TUBE_RES,
+        [BOARD_PWM_LCD] = PWM_BACKLIGHT_RES,
+        [BOARD_PWM_BUZZER] = PWM_BUZZER_RES,
+    };
+
+    ESP_RETURN_ON_FALSE(pwm < BOARD_PWM_COUNT && status, ESP_ERR_INVALID_ARG, TAG, "bad pwm");
+    uint32_t max_duty = (1u << (uint32_t)resolutions[pwm]) - 1u;
+    status->freq_hz = ledc_get_freq(PWM_SPEED_MODE, timers[pwm]);
+    status->duty_pct = ledc_get_duty(PWM_SPEED_MODE, channels[pwm]) * 100.0f / max_duty;
+    return ESP_OK;
 }
 
 static void hv_regulator_task(void *arg)

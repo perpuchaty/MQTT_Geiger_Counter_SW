@@ -9,18 +9,23 @@
 #include "api.h"
 #include "cJSON.h"
 #include "config.h"
+#include "driver/gpio.h"
 #include "esp_blufi.h"
 #include "esp_blufi_api.h"
 #include "esp_check.h"
+#include "esp_chip_info.h"
 #include "esp_http_server.h"
+#include "esp_idf_version.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_private/esp_clk.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/task.h"
 #include "geiger.h"
 #include "history_store.h"
 #include "lcd.h"
@@ -446,6 +451,111 @@ static esp_err_t live_get_handler(httpd_req_t *req)
     return send_json(req, root);
 }
 
+static const char *gpio_role(gpio_num_t gpio)
+{
+    if (gpio == PIN_LATCH && gpio == PIN_TUBE_CNT) return "latch / tube count";
+    switch (gpio) {
+    case PIN_CHARGE_EN: return "charge enable";
+    case PIN_CHRG: return "charger charging";
+    case PIN_STBY: return "charger standby";
+    case PIN_ADC_VLATCH: return "battery ADC";
+    case PIN_PWM_TUBE: return "tube PWM";
+    case PIN_ADC_TUBE: return "tube ADC";
+    case PIN_VTUBE_OK: return "tube voltage OK";
+    case PIN_LED: return "indicator LED";
+    case PIN_PWM_LCD: return "LCD PWM";
+    case PIN_BUTTON_ENTER: return "button enter";
+    case PIN_BUTTON_LEFT: return "button left";
+    case PIN_BUTTON_RIGHT: return "button right";
+    case PIN_PWM_BUZZER: return "buzzer PWM";
+    case PIN_LCD_CS: return "LCD chip select";
+    case PIN_LCD_RESET: return "LCD reset";
+    case PIN_LCD_A0: return "LCD data/command";
+    case PIN_LCD_DATA0: return "LCD data";
+    case PIN_LCD_CLOCK: return "LCD clock";
+    default: return "unused / reserved";
+    }
+}
+
+static const char *gpio_direction(bool input_enabled, bool output_enabled)
+{
+    if (input_enabled && output_enabled) return "input/output";
+    if (input_enabled) return "input";
+    if (output_enabled) return "output";
+    return "disabled";
+}
+
+static void diagnostics_add_pwm(cJSON *array, const char *name, int gpio, board_pwm_t pwm)
+{
+    board_pwm_status_t status = {0};
+    cJSON *item = cJSON_CreateObject();
+    cJSON_AddStringToObject(item, "name", name);
+    cJSON_AddNumberToObject(item, "gpio", gpio);
+    if (board_pwm_get_status(pwm, &status) == ESP_OK) {
+        cJSON_AddNumberToObject(item, "freq_hz", status.freq_hz);
+        cJSON_AddNumberToObject(item, "duty_pct", status.duty_pct);
+    }
+    cJSON_AddItemToArray(array, item);
+}
+
+static void diagnostics_add_adc(cJSON *array, const char *name, int gpio, board_adc_ch_t channel)
+{
+    int raw = 0;
+    int mv = 0;
+    cJSON *item = cJSON_CreateObject();
+    cJSON_AddStringToObject(item, "name", name);
+    cJSON_AddNumberToObject(item, "gpio", gpio);
+    if (board_adc_get_raw(channel, &raw) == ESP_OK) cJSON_AddNumberToObject(item, "raw", raw);
+    if (board_adc_get_mv(channel, &mv) == ESP_OK) cJSON_AddNumberToObject(item, "mv", mv);
+    cJSON_AddItemToArray(array, item);
+}
+
+static esp_err_t diagnostics_get_handler(httpd_req_t *req)
+{
+    esp_chip_info_t chip;
+    esp_chip_info(&chip);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "uptime_s", esp_timer_get_time() / 1000000);
+    cJSON_AddNumberToObject(root, "cpu_freq_mhz", esp_clk_cpu_freq() / 1000000);
+    cJSON_AddNumberToObject(root, "cores", chip.cores);
+    cJSON_AddNumberToObject(root, "revision", chip.revision);
+    cJSON_AddStringToObject(root, "idf_version", esp_get_idf_version());
+    cJSON_AddNumberToObject(root, "reset_reason", esp_reset_reason());
+    cJSON_AddNumberToObject(root, "heap_free", esp_get_free_heap_size());
+    cJSON_AddNumberToObject(root, "heap_min", esp_get_minimum_free_heap_size());
+    cJSON_AddNumberToObject(root, "tasks", uxTaskGetNumberOfTasks());
+    cJSON_AddNumberToObject(root, "http_stack_free", uxTaskGetStackHighWaterMark(NULL));
+
+    cJSON *pwm = cJSON_AddArrayToObject(root, "pwm");
+    diagnostics_add_pwm(pwm, "Tube HV", PIN_PWM_TUBE, BOARD_PWM_TUBE);
+    diagnostics_add_pwm(pwm, "LCD backlight", PIN_PWM_LCD, BOARD_PWM_LCD);
+    diagnostics_add_pwm(pwm, "Buzzer", PIN_PWM_BUZZER, BOARD_PWM_BUZZER);
+
+    cJSON *adc = cJSON_AddArrayToObject(root, "adc");
+    diagnostics_add_adc(adc, "Battery / latch", PIN_ADC_VLATCH, BOARD_ADC_VLATCH);
+    diagnostics_add_adc(adc, "Tube feedback", PIN_ADC_TUBE, BOARD_ADC_TUBE);
+    int tube_mv = 0;
+    if (board_tube_voltage_get_mv(&tube_mv) == ESP_OK) {
+        cJSON_AddNumberToObject(root, "tube_voltage_mv", tube_mv);
+    }
+
+    cJSON *gpios = cJSON_AddArrayToObject(root, "gpios");
+    for (int pin = 0; pin < GPIO_NUM_MAX; pin++) {
+        if (!GPIO_IS_VALID_GPIO(pin)) continue;
+        gpio_io_config_t io_config = {0};
+        cJSON *item = cJSON_CreateObject();
+        cJSON_AddNumberToObject(item, "gpio", pin);
+        cJSON_AddStringToObject(item, "role", gpio_role((gpio_num_t)pin));
+        if (gpio_get_io_config((gpio_num_t)pin, &io_config) == ESP_OK) {
+            cJSON_AddStringToObject(item, "direction", gpio_direction(io_config.ie, io_config.oe));
+        }
+        cJSON_AddNumberToObject(item, "level", gpio_get_level((gpio_num_t)pin));
+        cJSON_AddItemToArray(gpios, item);
+    }
+    return send_json(req, root);
+}
+
 static esp_err_t history_get_handler(httpd_req_t *req)
 {
     uint32_t window_s = settings_get()->history_short_window_s;
@@ -548,15 +658,20 @@ static esp_err_t scan_get_handler(httpd_req_t *req)
 static esp_err_t status_get_handler(httpd_req_t *req)
 {
     char ip[16];
+    wifi_config_t saved = {0};
     wifi_get_ip_str(ip, sizeof(ip));
+    bool has_credentials = esp_wifi_get_config(WIFI_IF_STA, &saved) == ESP_OK && saved.sta.ssid[0] != '\0';
 
     cJSON *root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "connected", s_sta_got_ip);
     cJSON_AddBoolToObject(root, "connecting", s_sta_connecting);
     cJSON_AddBoolToObject(root, "portal", (s_running & WIFI_PROV_SOFTAP) != 0);
+    cJSON_AddBoolToObject(root, "has_credentials", has_credentials);
     cJSON_AddStringToObject(root, "ip", ip);
     cJSON_AddStringToObject(root, "hostname", WIFI_MDNS_HOSTNAME);
     cJSON_AddStringToObject(root, "ssid", (const char *)s_sta_ssid);
+    cJSON_AddStringToObject(root, "remembered_ssid", has_credentials ? (const char *)saved.sta.ssid : "");
+    cJSON_AddStringToObject(root, "setup_ssid", s_ap_ssid);
     return send_json(req, root);
 }
 
@@ -778,6 +893,17 @@ static esp_err_t factory_reset_post_handler(httpd_req_t *req)
     return restart_post_handler(req);
 }
 
+static esp_err_t forget_wifi_post_handler(httpd_req_t *req)
+{
+    ESP_RETURN_ON_ERROR(wifi_forget(), TAG, "forget wifi");
+    ESP_RETURN_ON_ERROR(wifi_prov_start(WIFI_PROV_SOFTAP), TAG, "start setup portal");
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddStringToObject(root, "setup_ssid", s_ap_ssid);
+    return send_json(req, root);
+}
+
 /* While the portal runs, anything unknown is redirected so phones pop up the sign-in page. */
 static esp_err_t redirect_handler(httpd_req_t *req)
 {
@@ -804,6 +930,7 @@ static esp_err_t http_request_handler(httpd_req_t *req)
 
     if (req->method == HTTP_GET) {
         if (uri_path_is(req->uri, "/api/live")) return live_get_handler(req);
+        if (uri_path_is(req->uri, "/api/diagnostics")) return diagnostics_get_handler(req);
         if (uri_path_is(req->uri, "/api/history")) return history_get_handler(req);
         if (uri_path_is(req->uri, "/api/history_csv")) return history_csv_get_handler(req);
         if (uri_path_is(req->uri, "/api/scan")) return scan_get_handler(req);
@@ -814,6 +941,7 @@ static esp_err_t http_request_handler(httpd_req_t *req)
     if (req->method == HTTP_POST) {
         if (uri_path_is(req->uri, "/api/settings")) return settings_post_handler(req);
         if (uri_path_is(req->uri, "/api/connect")) return connect_post_handler(req);
+        if (uri_path_is(req->uri, "/api/forget_wifi")) return forget_wifi_post_handler(req);
         if (uri_path_is(req->uri, "/api/restart")) return restart_post_handler(req);
         if (uri_path_is(req->uri, "/api/factory_reset")) return factory_reset_post_handler(req);
     }
@@ -1133,7 +1261,14 @@ esp_err_t wifi_forget(void)
 {
     wifi_config_t empty = {0};
     esp_wifi_disconnect();
-    return esp_wifi_set_config(WIFI_IF_STA, &empty);
+    esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &empty);
+    if (err == ESP_OK) {
+        s_sta_connecting = false;
+        s_sta_got_ip = false;
+        s_sta_ssid_len = 0;
+        memset(s_sta_ssid, 0, sizeof(s_sta_ssid));
+    }
+    return err;
 }
 
 void wifi_get_ip_str(char *buf, size_t len)

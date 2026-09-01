@@ -123,6 +123,11 @@ label output{float:right;color:#e6e6e6;font-variant-numeric:tabular-nums}
 </section>
 
 <section id="wifi">
+  <div class="card" style="margin-bottom:.8rem">
+    <i>Remembered network</i>
+    <b id="remembered" style="font-size:1rem">--</b>
+  </div>
+  <button class="wide danger" id="forgetwifi" type="button" hidden>Forget network</button>
   <button class="wide alt" id="rescan" type="button">Scan networks</button>
   <ul id="list"></ul>
   <input id="ssid" placeholder="Network name" autocomplete="off" autocapitalize="off">
@@ -352,6 +357,8 @@ async function status() {
       : (s.portal ? 'Setup mode \u2013 not connected' : 'Not connected');
     $('sysnet').textContent = s.connected ? s.ssid : 'offline';
     $('offline').classList.toggle('on', !s.connected);
+    $('remembered').textContent = s.has_credentials ? s.remembered_ssid : 'None';
+    $('forgetwifi').hidden = !s.has_credentials;
     return s;
   } catch (e) { return null; }
 }
@@ -409,8 +416,26 @@ async function save() {
   $('save').disabled = false;
 }
 
+async function forgetWifi() {
+  const network = $('remembered').textContent;
+  if (!confirm('Forget "' + network + '" and return to Wi-Fi setup mode?')) return;
+  $('forgetwifi').disabled = true;
+  msg('Forgetting network\u2026');
+  try {
+    const response = await fetch('/api/forget_wifi', { method: 'POST' });
+    const result = await response.json();
+    $('remembered').textContent = 'None';
+    $('forgetwifi').hidden = true;
+    msg('Connect your phone to "' + result.setup_ssid + '" to configure Wi-Fi.');
+  } catch (e) {
+    msg('Network forgotten. Connect to the device setup Wi-Fi to continue.');
+  }
+  $('forgetwifi').disabled = false;
+}
+
 $('rescan').onclick = scan;
 $('save').onclick = save;
+$('forgetwifi').onclick = forgetWifi;
 $('gowifi').onclick = () => { show('wifi'); if (!$('list').children.length) scan(); };
 
 document.querySelectorAll('[data-button]').forEach(button => {

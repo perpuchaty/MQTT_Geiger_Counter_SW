@@ -34,6 +34,8 @@ typedef enum {
 
 static volatile lcd_screen_t s_screen = LCD_SCREEN_MAIN;
 static uint8_t s_menu_item;
+static bool s_wifi_forget_confirm;
+static bool s_wifi_forget_failed;
 static uint8_t s_system_field;
 static bool s_system_editing;
 static settings_t s_system_settings;
@@ -252,7 +254,7 @@ static void draw_mqtt_screen(void)
 static void draw_wifi_screen(void)
 {
     u8g2_t *display = board_lcd();
-    char text[24];
+    char text[32];
     char ip[16];
 
     if (display == NULL) {
@@ -264,11 +266,30 @@ static void draw_wifi_screen(void)
     u8g2_DrawStr(display, 4, 10, "WI-FI SETTINGS");
     u8g2_DrawHLine(display, 0, 13, LCD_WIDTH);
     u8g2_SetFont(display, u8g2_font_5x7_tf);
+
+    if (s_wifi_forget_confirm) {
+        u8g2_DrawStr(display, 4, 27, "FORGET SAVED NETWORK?");
+        u8g2_DrawStr(display, 4, 42, "ENTER YES");
+        u8g2_DrawStr(display, 4, 61, "LEFT CANCEL");
+        u8g2_SendBuffer(display);
+        return;
+    }
+
     snprintf(text, sizeof(text), "STATUS: %s", wifi_is_connected() ? "CONNECTED" : "DISCONNECTED");
     u8g2_DrawStr(display, 4, 26, text);
     wifi_get_ip_str(ip, sizeof(ip));
     snprintf(text, sizeof(text), "IP: %s", ip);
     u8g2_DrawStr(display, 4, 38, text);
+    if (s_wifi_forget_failed) {
+        u8g2_DrawStr(display, 4, 50, "FORGET FAILED");
+    } else if (wifi_has_credentials()) {
+        u8g2_DrawStr(display, 4, 50, "ENTER FORGET NETWORK");
+    } else if (wifi_prov_running() & WIFI_PROV_SOFTAP) {
+        snprintf(text, sizeof(text), "AP: %.25s", wifi_softap_ssid());
+        u8g2_DrawStr(display, 4, 50, text);
+    } else {
+        u8g2_DrawStr(display, 4, 50, "NO SAVED NETWORK");
+    }
     u8g2_DrawStr(display, 4, 61, "LEFT BACK");
     u8g2_SendBuffer(display);
 }
@@ -332,13 +353,15 @@ static void draw_hv_screen(void)
 {
     u8g2_t *display = board_lcd();
     char text[24];
+    int adc_raw = 0;
     int voltage_mv = 0;
-    const int row_y[] = { 25, 36, 47, 59 };
+    const int row_y[] = { 22, 31, 40, 49, 58 };
 
     if (display == NULL) {
         return;
     }
 
+    board_adc_get_raw(BOARD_ADC_TUBE, &adc_raw);
     board_tube_voltage_get_mv(&voltage_mv);
     u8g2_ClearBuffer(display);
     u8g2_SetFont(display, u8g2_font_6x10_tf);
@@ -347,13 +370,17 @@ static void draw_hv_screen(void)
     u8g2_SetFont(display, u8g2_font_5x7_tf);
     snprintf(text, sizeof(text), "ENABLE: %s", board_hv_is_enabled() ? "ON" : "OFF");
     u8g2_DrawStr(display, 7, row_y[0], text);
-    snprintf(text, sizeof(text), "DUTY:   %u %%", (unsigned)(board_hv_duty_pct() + 0.5f));
+    uint32_t duty_x10 = (uint32_t)(board_hv_output_duty_pct() * 10.0f + 0.5f);
+    snprintf(text, sizeof(text), "DUTY:   %lu.%lu %%", (unsigned long)(duty_x10 / 10),
+             (unsigned long)(duty_x10 % 10));
     u8g2_DrawStr(display, 7, row_y[1], text);
     snprintf(text, sizeof(text), "FREQ:   %lu Hz", (unsigned long)board_hv_freq_hz());
     u8g2_DrawStr(display, 7, row_y[2], text);
-    snprintf(text, sizeof(text), "TUBE:   %d V", (voltage_mv + 500) / 1000);
+    snprintf(text, sizeof(text), "ADC:    %d raw", adc_raw);
     u8g2_DrawStr(display, 7, row_y[3], text);
-    u8g2_DrawFrame(display, 2, 15 + s_hv_field * 11, LCD_WIDTH - 4, 11);
+    snprintf(text, sizeof(text), "TUBE:   %d V", (voltage_mv + 500) / 1000);
+    u8g2_DrawStr(display, 7, row_y[4], text);
+    u8g2_DrawFrame(display, 2, 15 + s_hv_field * 9, LCD_WIDTH - 4, 9);
     if (s_hv_editing) {
         u8g2_DrawBox(display, 120, 4, 4, 4);
     }
@@ -464,6 +491,8 @@ void lcd_handle_button(board_input_t input, bool pressed)
             if (s_menu_item == 0) {
                 s_screen = LCD_SCREEN_MAIN;
             } else if (s_menu_item == 1) {
+                s_wifi_forget_confirm = false;
+                s_wifi_forget_failed = false;
                 s_screen = LCD_SCREEN_WIFI;
             } else if (s_menu_item == 2) {
                 s_screen = LCD_SCREEN_MQTT;
@@ -497,8 +526,23 @@ void lcd_handle_button(board_input_t input, bool pressed)
         }
         break;
     case LCD_SCREEN_WIFI:
-        if (input == BOARD_IN_BTN_LEFT) {
-            s_screen = LCD_SCREEN_MENU;
+        if (input == BOARD_IN_BTN_ENTER && wifi_has_credentials()) {
+            if (!s_wifi_forget_confirm) {
+                s_wifi_forget_confirm = true;
+            } else {
+                esp_err_t err = wifi_forget();
+                if (err == ESP_OK) {
+                    err = wifi_prov_start(WIFI_PROV_SOFTAP);
+                }
+                s_wifi_forget_confirm = false;
+                s_wifi_forget_failed = err != ESP_OK;
+            }
+        } else if (input == BOARD_IN_BTN_LEFT) {
+            if (s_wifi_forget_confirm) {
+                s_wifi_forget_confirm = false;
+            } else {
+                s_screen = LCD_SCREEN_MENU;
+            }
         }
         break;
     case LCD_SCREEN_MQTT:
