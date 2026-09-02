@@ -15,6 +15,7 @@
 
 static const char *TAG = "lcd";
 static volatile uint8_t s_backlight_target;
+static volatile uint8_t s_backlight_current;
 static volatile int64_t s_last_activity_us;
 
 #define LCD_AUTO_DIM_DELAY_US (30LL * 1000000LL)
@@ -30,9 +31,12 @@ typedef enum {
     LCD_SCREEN_TIME,
     LCD_SCREEN_HV,
     LCD_SCREEN_LAMP_TEST,
+    LCD_SCREEN_SHUTDOWN,
+    LCD_SCREEN_OFF,
 } lcd_screen_t;
 
 static volatile lcd_screen_t s_screen = LCD_SCREEN_MAIN;
+static lcd_screen_t s_screen_before_shutdown = LCD_SCREEN_MAIN;
 static uint8_t s_menu_item;
 static bool s_wifi_forget_confirm;
 static bool s_wifi_forget_failed;
@@ -67,6 +71,7 @@ static void backlight_fade_task(void *arg)
             brightness--;
             board_backlight_set(brightness);
         }
+        s_backlight_current = brightness;
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -408,6 +413,23 @@ static void draw_lamp_test_screen(void)
     u8g2_SendBuffer(display);
 }
 
+static void draw_shutdown_screen(void)
+{
+    u8g2_t *display = board_lcd();
+    if (display == NULL) {
+        return;
+    }
+
+    u8g2_ClearBuffer(display);
+    u8g2_SetFont(display, u8g2_font_6x10_tf);
+    u8g2_DrawStr(display, 4, 10, "SHUT DOWN?");
+    u8g2_DrawHLine(display, 0, 13, LCD_WIDTH);
+    u8g2_DrawStr(display, 24, 35, "ENTER  YES");
+    u8g2_SetFont(display, u8g2_font_5x7_tf);
+    u8g2_DrawStr(display, 4, 61, "LEFT CANCEL");
+    u8g2_SendBuffer(display);
+}
+
 static void time_adjust(int direction)
 {
     if (s_time_field == 0) {
@@ -467,14 +489,27 @@ static void system_adjust(int direction)
     }
 }
 
-void lcd_handle_button(board_input_t input, bool pressed)
+bool lcd_handle_button(board_input_t input, bool pressed)
 {
+    if (s_screen == LCD_SCREEN_SHUTDOWN) {
+        if (!pressed) {
+            return false;
+        }
+        s_last_activity_us = esp_timer_get_time();
+        if (input == BOARD_IN_BTN_ENTER) {
+            return true;
+        }
+        if (input == BOARD_IN_BTN_LEFT) {
+            s_screen = s_screen_before_shutdown;
+        }
+        return false;
+    }
     if (s_screen == LCD_SCREEN_LAMP_TEST && input == BOARD_IN_BTN_ENTER) {
         s_lamp_test_active = pressed;
-        return;
+        return false;
     }
     if (!pressed) {
-        return;
+        return false;
     }
     s_last_activity_us = esp_timer_get_time();
 
@@ -653,6 +688,37 @@ void lcd_handle_button(board_input_t input, bool pressed)
             s_screen = LCD_SCREEN_MENU;
         }
         break;
+    case LCD_SCREEN_SHUTDOWN:
+    case LCD_SCREEN_OFF:
+        break;
+    }
+    return false;
+}
+
+void lcd_request_shutdown_confirmation(void)
+{
+    if (s_screen != LCD_SCREEN_SHUTDOWN && s_screen != LCD_SCREEN_OFF) {
+        s_screen_before_shutdown = s_screen;
+        s_lamp_test_active = false;
+        s_last_activity_us = esp_timer_get_time();
+        s_screen = LCD_SCREEN_SHUTDOWN;
+    }
+}
+
+void lcd_fade_out_and_clear(void)
+{
+    s_backlight_target = 0;
+    while (s_backlight_current > 0) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    s_screen = LCD_SCREEN_OFF;
+    vTaskDelay(pdMS_TO_TICKS(300));
+
+    u8g2_t *display = board_lcd();
+    if (display != NULL) {
+        u8g2_ClearBuffer(display);
+        u8g2_SendBuffer(display);
     }
 }
 
@@ -692,6 +758,11 @@ static void main_screen_task(void *arg)
         case LCD_SCREEN_LAMP_TEST:
             draw_lamp_test_screen();
             break;
+        case LCD_SCREEN_SHUTDOWN:
+            draw_shutdown_screen();
+            break;
+        case LCD_SCREEN_OFF:
+            break;
         }
         vTaskDelay(pdMS_TO_TICKS(250));
     }
@@ -727,5 +798,32 @@ void lcd_draw_startup_screen(void)
 
     u8g2_SetFont(display, u8g2_font_5x7_tf);
     u8g2_DrawStr(display, 34, 61, "INITIALIZING");
+    u8g2_SendBuffer(display);
+}
+
+void lcd_draw_battery_animation(uint8_t frame)
+{
+    u8g2_t *display = board_lcd();
+
+    if (display == NULL) {
+        return;
+    }
+
+    const int battery_x = 35;
+    const int battery_y = 17;
+    const int battery_w = 56;
+    const int battery_h = 28;
+    const int segment_count = (frame % 5) + 1;
+
+    u8g2_ClearBuffer(display);
+    u8g2_SetFont(display, u8g2_font_6x10_tf);
+    u8g2_DrawStr(display, 29, 10, "STANDBY");
+    u8g2_DrawFrame(display, battery_x, battery_y, battery_w, battery_h);
+    u8g2_DrawBox(display, battery_x + battery_w, battery_y + 8, 4, battery_h - 16);
+    for (int segment = 0; segment < segment_count; segment++) {
+        u8g2_DrawBox(display, battery_x + 4 + segment * 10, battery_y + 4, 7, battery_h - 8);
+    }
+    u8g2_SetFont(display, u8g2_font_5x7_tf);
+    u8g2_DrawStr(display, 17, 61, "HOLD ENTER TO START");
     u8g2_SendBuffer(display);
 }

@@ -2,6 +2,7 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -112,6 +113,8 @@ typedef struct {
 } button_event_t;
 
 #define POWER_OFF_HOLD_US (3ULL * 1000 * 1000)
+#define POWER_ON_HOLD_US  (3LL * 1000 * 1000)
+#define POWER_ON_FRAME_MS 200
 
 static QueueHandle_t s_button_events;
 static esp_timer_handle_t s_power_off_timer;
@@ -119,9 +122,19 @@ static esp_timer_handle_t s_power_off_timer;
 static void power_off_timer_cb(void *arg)
 {
     if (!board_input_level(BOARD_IN_BTN_ENTER)) {
-        ESP_LOGI(TAG, "Enter held for 3 seconds, releasing power latch");
-        board_set_latch(false);
+        ESP_LOGI(TAG, "Enter held for 3 seconds, requesting shutdown confirmation");
+        lcd_request_shutdown_confirmation();
     }
+}
+
+static void power_off(void)
+{
+    ESP_LOGI(TAG, "Shutdown confirmed");
+    board_buzzer_off();
+    lcd_fade_out_and_clear();
+    board_set_latch(false);
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
 }
 
 static void power_off_hold_update(const button_event_t *event)
@@ -189,8 +202,12 @@ static void button_event_task(void *arg)
         power_off_hold_update(&event);
 
         bool lamp_test_was_active = lcd_lamp_test_active();
-        lcd_handle_button(event.input, !event.level);
+        bool shutdown_confirmed = lcd_handle_button(event.input, !event.level);
         bool lamp_test_is_active = lcd_lamp_test_active();
+
+        if (shutdown_confirmed) {
+            power_off();
+        }
 
         if (lamp_test_is_active) {
             if (esp_timer_is_active(s_tick_stop_timer)) {
@@ -235,6 +252,37 @@ static void nvs_bringup(void)
     ESP_ERROR_CHECK(err);
 }
 
+static void wait_for_power_on(void)
+{
+    if (!board_input_level(BOARD_IN_BTN_ENTER)) {
+        ESP_LOGI(TAG, "Enter held at startup, continuing");
+        return;
+    }
+
+    ESP_LOGI(TAG, "Waiting for a 3 second Enter hold");
+    int64_t pressed_since_us = 0;
+    uint8_t animation_frame = 0;
+
+    for (;;) {
+        int64_t now_us = esp_timer_get_time();
+        lcd_draw_battery_animation(animation_frame++);
+
+        if (!board_input_level(BOARD_IN_BTN_ENTER)) {
+            if (pressed_since_us == 0) {
+                pressed_since_us = now_us;
+            } else if (now_us - pressed_since_us >= POWER_ON_HOLD_US) {
+                ESP_LOGI(TAG, "Enter held for 3 seconds, continuing startup");
+                lcd_set_backlight(settings_get()->lcd_brightness);
+                return;
+            }
+        } else {
+            pressed_since_us = 0;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(POWER_ON_FRAME_MS));
+    }
+}
+
 void app_main(void)
 {
     nvs_bringup();
@@ -244,14 +292,16 @@ void app_main(void)
 
     ESP_ERROR_CHECK(board_init());
     board_apply_settings();
+    ESP_ERROR_CHECK(lcd_backlight_init());
+    wait_for_power_on();
+    lcd_draw_startup_screen();
+
     ESP_ERROR_CHECK(board_hv_set_freq(PWM_TUBE_FREQ_HZ));
     ESP_ERROR_CHECK(board_hv_set_duty(PWM_TUBE_STARTUP_DUTY_PCT));
     ESP_ERROR_CHECK(board_hv_set_enabled(settings_get()->hv_start_enabled));
     ESP_ERROR_CHECK(board_hv_regulator_start());
-    ESP_ERROR_CHECK(lcd_backlight_init());
     ESP_ERROR_CHECK(tube_tick_init());
     ESP_ERROR_CHECK(button_events_init());
-    lcd_draw_startup_screen();
     ESP_ERROR_CHECK(geiger_start());
     ESP_ERROR_CHECK(wifi_prov_init());
     ESP_ERROR_CHECK(mqtt_init());
