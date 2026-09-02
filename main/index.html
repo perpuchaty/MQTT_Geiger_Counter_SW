@@ -1,0 +1,682 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Geiger Counter</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;font:16px system-ui,sans-serif;background:#101418;color:#e6e6e6}
+header{padding:1rem 1.2rem .6rem;border-bottom:1px solid #2a3138}
+h1{font-size:1.1rem;margin:0}
+#host{color:#8a949e;font-size:.8rem;margin-top:.2rem}
+nav{display:flex;overflow-x:auto;border-bottom:1px solid #2a3138;background:#141a20}
+nav button{flex:1 0 auto;padding:.75rem 1rem;background:none;border:none;border-bottom:2px solid transparent;
+  color:#8a949e;font:inherit;font-size:.9rem;cursor:pointer;white-space:nowrap}
+nav button.on{color:#e6e6e6;border-bottom-color:#2f7dd1}
+main{padding:1.2rem;max-width:34rem;margin:0 auto}
+section{display:none}
+section.on{display:block}
+.dose{text-align:center;padding:1.2rem 0}
+.dose b{display:block;font-size:3rem;font-weight:600;line-height:1.1;font-variant-numeric:tabular-nums}
+.dose span{color:#8a949e;font-size:.9rem}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:.6rem;margin-top:1rem}
+.card{background:#171d23;border:1px solid #2a3138;border-radius:10px;padding:.7rem .8rem}
+.chart{background:#171d23;border:1px solid #2a3138;border-radius:10px;padding:.6rem .5rem .35rem}
+.chart canvas{display:block;width:100%;height:130px}
+.chart .lbl{display:flex;justify-content:space-between;color:#8a949e;font-size:.72rem;padding:.35rem .3rem 0}
+.chart .lbl select{background:#101418;color:#c4ccd4;border:1px solid #2a3138;border-radius:6px;font-size:.72rem;padding:.1rem .2rem}
+.card i{display:block;color:#8a949e;font-size:.75rem;font-style:normal;text-transform:uppercase;letter-spacing:.04em}
+.card b{font-size:1.2rem;font-weight:600;font-variant-numeric:tabular-nums}
+.diag-title{font-size:.82rem;text-transform:uppercase;letter-spacing:.04em;margin:1.2rem 0 .45rem;color:#aeb7c0}
+.table-wrap{overflow-x:auto;border:1px solid #2a3138;border-radius:8px}
+.diag-table{width:100%;border-collapse:collapse;font-size:.82rem;font-variant-numeric:tabular-nums}
+.diag-table th,.diag-table td{padding:.5rem .6rem;text-align:left;border-top:1px solid #2a3138;white-space:nowrap}
+.diag-table tr:first-child th{border-top:none}
+.diag-table th{color:#8a949e;font-size:.7rem;text-transform:uppercase;letter-spacing:.04em;background:#141a20}
+.diag-table td:last-child{white-space:normal}
+ul{list-style:none;margin:0 0 .8rem;padding:0;border:1px solid #2a3138;border-radius:10px;overflow:hidden}
+li{display:flex;justify-content:space-between;gap:.5rem;padding:.7rem .8rem;cursor:pointer;border-top:1px solid #2a3138}
+li:first-child{border-top:none}
+li:hover,li.sel{background:#1c242c}
+.meta{color:#8a949e;font-size:.85rem;white-space:nowrap}
+input,select,button.wide{width:100%;padding:.7rem;margin-bottom:.7rem;border-radius:8px;border:1px solid #2a3138;
+  background:#171d23;color:#e6e6e6;font-size:1rem}
+button.wide{background:#2f7dd1;border-color:#2f7dd1;font-weight:600;cursor:pointer}
+button.wide.alt{background:#171d23;border-color:#2a3138;font-weight:400}
+button.wide.danger{background:#8f2d2d;border-color:#8f2d2d}
+button.wide:disabled{opacity:.5;cursor:default}
+input[type=range]{padding:0;border:none;background:none;accent-color:#2f7dd1}
+label{display:block;color:#8a949e;font-size:.78rem;text-transform:uppercase;letter-spacing:.04em;margin-bottom:.25rem}
+label.row{display:flex;align-items:center;gap:.5rem;text-transform:none;font-size:.95rem;letter-spacing:0;
+  color:#e6e6e6;margin-bottom:.8rem}
+label.row input{width:auto;margin:0}
+label output{float:right;color:#e6e6e6;font-variant-numeric:tabular-nums}
+#msg,#mqttmsg,#tubemsg,#devmsg{min-height:1.4rem;font-size:.9rem;color:#8a949e}
+.soon{color:#8a949e;font-size:.9rem;line-height:1.5}
+.banner{display:none;align-items:center;justify-content:space-between;gap:.6rem;margin-bottom:1rem;
+  padding:.6rem .8rem;border:1px solid #4a3a1a;background:#241d10;border-radius:10px;font-size:.9rem}
+.banner.on{display:flex}
+.banner button{padding:.45rem .8rem;border-radius:8px;border:1px solid #2f7dd1;background:#2f7dd1;
+  color:#fff;font:inherit;font-size:.85rem;font-weight:600;cursor:pointer;white-space:nowrap}
+</style>
+</head>
+<body>
+<header>
+  <h1>Geiger Counter</h1>
+  <div id="host"></div>
+</header>
+
+<nav>
+  <button data-tab="live" class="on">Live</button>
+  <button data-tab="wifi">Wi-Fi</button>
+  <button data-tab="history">History</button>
+  <button data-tab="mqtt">MQTT</button>
+  <button data-tab="tube">Tube</button>
+  <button data-tab="hv">High voltage</button>
+  <button data-tab="device">Device</button>
+  <button data-tab="system">System</button>
+</nav>
+
+<main>
+<section id="live" class="on">
+  <div class="banner" id="offline">
+    <span>Not connected to a network.</span>
+    <button type="button" id="gowifi">Set up Wi-Fi</button>
+  </div>
+  <div class="dose"><b id="usvh">--</b><span>&micro;Sv/h</span></div>
+  <div class="chart">
+    <canvas id="chart"></canvas>
+    <div class="lbl">
+      <span id="chartspan">Collecting history&hellip;</span>
+      <select id="livewin">
+        <option value="300">5 min</option>
+        <option value="900">15 min</option>
+        <option value="1800">30 min</option>
+        <option value="3600">1 hour</option>
+      </select>
+      <span id="chartmax"></span>
+    </div>
+  </div>
+  <div class="grid">
+    <div class="card"><i>CPM</i><b id="cpm">--</b></div>
+    <div class="card"><i>Total counts</i><b id="total">--</b></div>
+    <div class="card"><i>Tube HV</i><b id="hv">--</b></div>
+    <div class="card"><i>Battery</i><b id="vbat">--</b></div>
+    <div class="card"><i>HV PWM</i><b id="hvpwm">--</b></div>
+  </div>
+  <div class="grid">
+    <button class="wide alt" type="button" data-button="left">Left</button>
+    <button class="wide alt" type="button" data-button="enter">Enter</button>
+    <button class="wide alt" type="button" data-button="right">Right</button>
+  </div>
+</section>
+
+<section id="history">
+  <label for="histwin">Time range</label>
+  <select id="histwin">
+    <option value="3600">Last 1 hour</option>
+    <option value="21600">Last 6 hours</option>
+    <option value="86400">Last 24 hours</option>
+    <option value="604800">Last 7 days</option>
+    <option value="1728000">Last 20 days</option>
+  </select>
+  <button class="wide alt" id="histrefresh" type="button">Refresh</button>
+  <div class="chart">
+    <canvas id="chart_hist"></canvas>
+    <div class="lbl"><span id="histspan">No data yet</span><span id="histmax"></span></div>
+  </div>
+</section>
+
+<section id="wifi">
+  <div class="card" style="margin-bottom:.8rem">
+    <i>Remembered network</i>
+    <b id="remembered" style="font-size:1rem">--</b>
+  </div>
+  <button class="wide danger" id="forgetwifi" type="button" hidden>Forget network</button>
+  <button class="wide alt" id="rescan" type="button">Scan networks</button>
+  <ul id="list"></ul>
+  <input id="ssid" placeholder="Network name" autocomplete="off" autocapitalize="off">
+  <input id="pass" type="password" placeholder="Password" autocomplete="off">
+  <button class="wide" id="save" type="button">Connect</button>
+  <div id="msg"></div>
+</section>
+
+<section id="mqtt">
+  <div class="card" style="margin-bottom:1rem"><i>Broker status</i><b id="mqttstate" style="font-size:1rem">--</b></div>
+  <label class="row"><input type="checkbox" id="mq_en"> Publish to MQTT</label>
+  <label for="dev_name">Device name</label>
+  <input id="dev_name" placeholder="Geiger Counter" autocomplete="off">
+  <label for="mq_uri">Broker URI</label>
+  <input id="mq_uri" placeholder="mqtt://homeassistant.local:1883" autocomplete="off" autocapitalize="off">
+  <label for="mq_user">Username</label>
+  <input id="mq_user" placeholder="optional" autocomplete="off" autocapitalize="off">
+  <label for="mq_pass">Password</label>
+  <input id="mq_pass" type="password" placeholder="optional" autocomplete="new-password">
+  <label for="mq_topic">Base topic</label>
+  <input id="mq_topic" placeholder="geiger" autocomplete="off" autocapitalize="off">
+  <label class="row"><input type="checkbox" id="mq_disc"> Home Assistant discovery</label>
+  <label for="mq_pfx">Discovery prefix</label>
+  <input id="mq_pfx" placeholder="homeassistant" autocomplete="off" autocapitalize="off">
+  <label for="mq_int">Publish interval (s)</label>
+  <input id="mq_int" type="number" min="1" max="3600">
+  <button class="wide" id="mqttsave" type="button">Save</button>
+  <div id="mqttmsg"></div>
+</section>
+
+<section id="tube">
+  <label for="tb_v">Target tube voltage (V)</label>
+  <input id="tb_v" type="number" min="200" max="600" step="5">
+  <label for="tb_win">Averaging window (s)</label>
+  <input id="tb_win" type="number" min="5" max="300">
+  <label for="tb_cpm">Sensitivity (CPM per &micro;Sv/h)</label>
+  <input id="tb_cpm" type="number" min="1" max="10000" step="0.1">
+  <button class="wide" id="tubesave" type="button">Save</button>
+  <div id="tubemsg"></div>
+</section>
+
+<section id="hv">
+  <div class="grid">
+    <div class="card"><i>Tube voltage</i><b id="hvvoltage">--</b></div>
+    <div class="card"><i>HV state</i><b id="hvstate">--</b></div>
+  </div>
+  <label class="row"><input type="checkbox" id="hv_enabled"> Enable high voltage</label>
+  <label for="hv_duty">PWM duty <output id="hv_duty_v"></output></label>
+  <input id="hv_duty" type="range" min="0" max="35" step="1">
+  <label for="hv_freq">PWM frequency (Hz)</label>
+  <input id="hv_freq" type="number" min="100" max="100000" step="100">
+  <button class="wide danger" id="hvapply" type="button">Apply high voltage settings</button>
+  <div id="hvmsg"></div>
+</section>
+
+<section id="device">
+  <label for="spk_vol">Buzzer duty <output id="spk_vol_v"></output></label>
+  <input id="spk_vol" type="range" min="0" max="200" step="1">
+  <label for="spk_snd">Click length</label>
+  <select id="spk_snd">
+    <option value="0">Short (5 ms)</option>
+    <option value="1">Normal (20 ms)</option>
+    <option value="2">Long (50 ms)</option>
+  </select>
+  <label for="lcd_bri">LCD brightness <output id="lcd_bri_v"></output></label>
+  <input id="lcd_bri" type="range" min="0" max="100">
+  <label class="row"><input type="checkbox" id="lcd_dim"> Dim the LCD when idle</label>
+  <label class="row"><input type="checkbox" id="led_en"> Indicator LED</label>
+  <label class="row"><input type="checkbox" id="chg_en"> Battery charging</label>
+  <label class="row"><input type="checkbox" id="hv_start"> Generate high voltage at startup</label>
+  <label for="tz_offset">Standard/winter UTC offset (hours)</label>
+  <input id="tz_offset" type="number" min="-12" max="14" step="0.5">
+  <label class="row"><input type="checkbox" id="tz_dst"> Daylight saving time (+1 hour)</label>
+  <button class="wide" id="devsave" type="button">Save</button>
+  <button class="wide alt" id="restart" type="button">Reset device</button>
+  <button class="wide danger" id="factoryreset" type="button">Factory reset device</button>
+  <div id="devmsg"></div>
+</section>
+
+<section id="system">
+  <div class="grid">
+    <div class="card"><i>CPU</i><b id="diagcpu">--</b></div>
+    <div class="card"><i>Uptime</i><b id="uptime">--</b></div>
+    <div class="card"><i>Free heap</i><b id="diagheap">--</b></div>
+    <div class="card"><i>Minimum heap</i><b id="diagheapmin">--</b></div>
+    <div class="card"><i>Tasks</i><b id="diagtasks">--</b></div>
+    <div class="card"><i>ESP-IDF</i><b id="diagidf" style="font-size:.9rem">--</b></div>
+  </div>
+  <h2 class="diag-title">PWM outputs</h2>
+  <div class="table-wrap"><table class="diag-table" id="diagpwm"></table></div>
+  <h2 class="diag-title">ADC inputs</h2>
+  <div class="table-wrap"><table class="diag-table" id="diagadc"></table></div>
+  <h2 class="diag-title">GPIO state</h2>
+  <div class="table-wrap"><table class="diag-table" id="diaggpio"></table></div>
+  <button class="wide alt" id="diagrefresh" type="button" style="margin-top:.8rem">Refresh diagnostics</button>
+  <div id="diagmsg"></div>
+</section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const msg = t => $('msg').textContent = t;
+
+function show(name) {
+  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.tab === name));
+  document.querySelectorAll('main section').forEach(s => s.classList.toggle('on', s.id === name));
+  location.hash = name;
+  if (name === 'live') drawLiveChart();
+  if (name === 'history') drawHistChart();
+  if (name === 'system') diagnostics();
+}
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => show(b.dataset.tab));
+
+/* ---- live readings ---- */
+const fmtV = mv => (mv / 1000).toFixed(2) + ' V';
+
+async function live() {
+  try {
+    const d = await (await fetch('/api/live')).json();
+    $('usvh').textContent = d.usvh.toFixed(3);
+    $('cpm').textContent = d.cpm;
+    $('total').textContent = d.total;
+    $('hv').textContent = fmtV(d.hv_mv);
+    $('vbat').textContent = fmtV(d.vbat_mv);
+    $('hvpwm').textContent = d.hv_pwm_freq_hz + ' Hz / ' + d.hv_pwm_duty_pct.toFixed(0) + '%';
+    $('hvvoltage').textContent = fmtV(d.hv_mv);
+    $('hvstate').textContent = d.hv_pwm_enabled ? 'ON' : 'OFF';
+    if (document.activeElement !== $('hv_enabled')) $('hv_enabled').checked = d.hv_pwm_enabled;
+    if (document.activeElement !== $('hv_duty')) $('hv_duty').value = d.hv_pwm_duty_pct.toFixed(0);
+    if (document.activeElement !== $('hv_freq')) $('hv_freq').value = d.hv_pwm_freq_hz;
+    $('hv_duty_v').textContent = $('hv_duty').value + '%';
+    $('uptime').textContent = new Date(d.uptime * 1000).toISOString().substr(11, 8);
+  } catch (e) { /* transient while the radio switches channels */ }
+}
+
+/* ---- history chart ---- */
+let hist = { cpm: [], ts: [], window_s: 300, cpm_per_usvh: 153.8 };
+let histLong = { cpm: [], ts: [], window_s: 3600, cpm_per_usvh: 153.8 };
+
+function drawSeries(canvasId, spanId, maxId, data, windowS) {
+  const c = $(canvasId), dpr = window.devicePixelRatio || 1;
+  const w = c.clientWidth, h = c.clientHeight;
+  if (!w) return;
+  c.width = w * dpr;
+  c.height = h * dpr;
+  const g = c.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+
+  g.strokeStyle = '#2a3138';
+  g.lineWidth = 1;
+  for (let i = 0; i <= 3; i++) {
+    const y = Math.round(h * i / 3) + .5;
+    g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke();
+  }
+
+  const v = data;
+  if (v.length < 2) return;
+  const max = Math.max(10, ...v) * 1.15;
+  const px = i => i * w / (v.length - 1);
+  const py = n => h - (n / max) * (h - 2) - 1;
+
+  const fill = g.createLinearGradient(0, 0, 0, h);
+  fill.addColorStop(0, 'rgba(47,125,209,.45)');
+  fill.addColorStop(1, 'rgba(47,125,209,0)');
+  g.beginPath();
+  g.moveTo(0, h);
+  v.forEach((n, i) => g.lineTo(px(i), py(n)));
+  g.lineTo(w, h);
+  g.closePath();
+  g.fillStyle = fill;
+  g.fill();
+
+  g.beginPath();
+  v.forEach((n, i) => i ? g.lineTo(px(i), py(n)) : g.moveTo(0, py(n)));
+  g.strokeStyle = '#2f7dd1';
+  g.lineWidth = 2;
+  g.lineJoin = 'round';
+  g.stroke();
+
+  const mins = Math.round(windowS / 60);
+  $(spanId).textContent = mins >= 60 ? 'Last ' + (mins / 60) + ' h' : 'Last ' + mins + ' min';
+  $(maxId).textContent = 'peak ' + Math.max(...v) + ' CPM';
+}
+
+function drawLiveChart() {
+  drawSeries('chart', 'chartspan', 'chartmax', hist.cpm, hist.window_s);
+}
+
+function drawHistChart() {
+  drawSeries('chart_hist', 'histspan', 'histmax', histLong.cpm, histLong.window_s);
+}
+
+async function historyShort() {
+  const windowS = Number($('livewin').value) || 300;
+  try {
+    hist = await (await fetch('/api/history?window_s=' + windowS)).json();
+    drawLiveChart();
+  } catch (e) { /* transient */ }
+}
+
+async function historyLong() {
+  const windowS = Number($('histwin').value) || 3600;
+  try {
+    const text = await (await fetch('/api/history_csv')).text();
+    const now = Math.floor(Date.now() / 1000);
+    const since = now - windowS;
+    const cpm = [];
+    const ts = [];
+    text.split(/\r?\n/).forEach(line => {
+      const p = line.split(',');
+      if (p.length < 2) return;
+      const t = Number(p[0]);
+      const v = Number(p[1]);
+      if (!Number.isFinite(t) || !Number.isFinite(v) || t < since) return;
+      ts.push(t);
+      cpm.push(v);
+    });
+    const MAX_POINTS = 1200;
+    if (cpm.length > MAX_POINTS) {
+      const step = Math.ceil(cpm.length / MAX_POINTS);
+      histLong = { cpm: cpm.filter((_, i) => i % step === 0), ts: ts.filter((_, i) => i % step === 0), window_s: windowS, cpm_per_usvh: hist.cpm_per_usvh };
+    } else {
+      histLong = { cpm, ts, window_s: windowS, cpm_per_usvh: hist.cpm_per_usvh };
+    }
+    drawHistChart();
+  } catch (e) { /* transient */ }
+}
+window.addEventListener('resize', () => {
+  drawLiveChart();
+  drawHistChart();
+});
+
+async function status() {
+  try {
+    const s = await (await fetch('/api/status')).json();
+    $('host').textContent = s.connected
+      ? s.ssid + ' \u00b7 ' + s.ip + ' \u00b7 http://' + s.hostname + '.local'
+      : (s.portal ? 'Setup mode \u2013 not connected' : 'Not connected');
+    $('offline').classList.toggle('on', !s.connected);
+    $('remembered').textContent = s.has_credentials ? s.remembered_ssid : 'None';
+    $('forgetwifi').hidden = !s.has_credentials;
+    return s;
+  } catch (e) { return null; }
+}
+
+/* ---- system diagnostics ---- */
+const formatBytes = bytes => bytes >= 1048576
+  ? (bytes / 1048576).toFixed(2) + ' MB'
+  : (bytes / 1024).toFixed(1) + ' KB';
+
+function formatUptime(seconds) {
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor(seconds % 86400 / 3600);
+  const minutes = Math.floor(seconds % 3600 / 60);
+  return (days ? days + 'd ' : '') + hours + 'h ' + minutes + 'm';
+}
+
+function fillTable(id, headings, rows) {
+  const table = $(id);
+  table.replaceChildren();
+  const head = document.createElement('tr');
+  headings.forEach(text => {
+    const cell = document.createElement('th');
+    cell.textContent = text;
+    head.appendChild(cell);
+  });
+  table.appendChild(head);
+  rows.forEach(values => {
+    const row = document.createElement('tr');
+    values.forEach(value => {
+      const cell = document.createElement('td');
+      cell.textContent = value;
+      row.appendChild(cell);
+    });
+    table.appendChild(row);
+  });
+}
+
+async function diagnostics() {
+  $('diagrefresh').disabled = true;
+  $('diagmsg').textContent = 'Reading hardware...';
+  try {
+    const response = await fetch('/api/diagnostics', { cache: 'no-store' });
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    const d = await response.json();
+    $('diagcpu').textContent = d.cpu_freq_mhz + ' MHz / ' + d.cores + ' core' + (d.cores === 1 ? '' : 's');
+    $('uptime').textContent = formatUptime(d.uptime_s);
+    $('diagheap').textContent = formatBytes(d.heap_free);
+    $('diagheapmin').textContent = formatBytes(d.heap_min);
+    $('diagtasks').textContent = d.tasks;
+    $('diagidf').textContent = d.idf_version;
+    fillTable('diagpwm', ['Output', 'GPIO', 'Frequency', 'Duty'], d.pwm.map(p => [
+      p.name, p.gpio, p.freq_hz == null ? '--' : p.freq_hz + ' Hz',
+      p.duty_pct == null ? '--' : p.duty_pct.toFixed(1) + '%'
+    ]));
+    fillTable('diagadc', ['Input', 'GPIO', 'Raw', 'Voltage'], d.adc.map(a => [
+      a.name, a.gpio, a.raw == null ? '--' : a.raw,
+      a.mv == null ? '--' : a.mv + ' mV'
+    ]));
+    fillTable('diaggpio', ['GPIO', 'Direction', 'Level', 'Role'], d.gpios.map(g => [
+      g.gpio, g.direction || '--', g.level, g.role
+    ]));
+      $('diagmsg').textContent = 'Live hardware state; reset reason ' + d.reset_reason;
+  } catch (e) {
+    $('diagmsg').textContent = 'Diagnostics unavailable: ' + e.message;
+  }
+  $('diagrefresh').disabled = false;
+}
+
+$('diagrefresh').onclick = diagnostics;
+
+/* ---- wi-fi tab ---- */
+async function scan() {
+  $('rescan').disabled = true;
+  msg('Scanning\u2026');
+  try {
+    const aps = await (await fetch('/api/scan')).json();
+    aps.sort((a, b) => b.rssi - a.rssi);
+    $('list').innerHTML = '';
+    for (const ap of aps) {
+      const li = document.createElement('li');
+      const name = document.createElement('span');
+      name.textContent = ap.ssid;
+      const meta = document.createElement('span');
+      meta.className = 'meta';
+      meta.textContent = (ap.lock ? '\u{1F512} ' : '') + ap.rssi + ' dBm';
+      li.append(name, meta);
+      li.onclick = () => {
+        document.querySelectorAll('#list li').forEach(e => e.classList.remove('sel'));
+        li.classList.add('sel');
+        $('ssid').value = ap.ssid;
+        $('pass').focus();
+      };
+      $('list').append(li);
+    }
+    msg(aps.length ? 'Pick a network' : 'No networks found');
+  } catch (e) {
+    msg('Scan failed');
+  }
+  $('rescan').disabled = false;
+}
+
+async function save() {
+  if (!$('ssid').value) { msg('Enter a network name'); return; }
+  $('save').disabled = true;
+  msg('Connecting\u2026');
+  await fetch('/api/connect', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ssid: $('ssid').value, password: $('pass').value })
+  });
+  for (let i = 0; i < 20; i++) {
+    await new Promise(r => setTimeout(r, 1000));
+    const s = await status();
+    if (s && s.connected) {
+      msg('Connected as ' + s.ip + ', also reachable at http://' + s.hostname + '.local');
+      setTimeout(() => show('live'), 1200);
+      return;
+    }
+  }
+  msg('Could not connect, check the password');
+  $('save').disabled = false;
+}
+
+async function forgetWifi() {
+  const network = $('remembered').textContent;
+  if (!confirm('Forget "' + network + '" and return to Wi-Fi setup mode?')) return;
+  $('forgetwifi').disabled = true;
+  msg('Forgetting network\u2026');
+  try {
+    const response = await fetch('/api/forget_wifi', { method: 'POST' });
+    const result = await response.json();
+    $('remembered').textContent = 'None';
+    $('forgetwifi').hidden = true;
+    msg('Connect your phone to "' + result.setup_ssid + '" to configure Wi-Fi.');
+  } catch (e) {
+    msg('Network forgotten. Connect to the device setup Wi-Fi to continue.');
+  }
+  $('forgetwifi').disabled = false;
+}
+
+$('rescan').onclick = scan;
+$('save').onclick = save;
+$('forgetwifi').onclick = forgetWifi;
+$('gowifi').onclick = () => { show('wifi'); if (!$('list').children.length) scan(); };
+
+document.querySelectorAll('[data-button]').forEach(button => {
+  button.onclick = () => fetch('/api/button?' + button.dataset.button, { method: 'POST' });
+});
+
+/* ---- settings tabs ---- */
+const mqttMsg = t => $('mqttmsg').textContent = t;
+let passStored = false;
+
+async function loadSettings(fill = true) {
+  try {
+    const s = await (await fetch('/api/settings')).json();
+    $('mqttstate').textContent = s.mqtt_state;
+    if (!fill) return;
+    $('dev_name').value = s.device_name;
+    $('mq_en').checked = s.mqtt_enabled;
+    $('mq_uri').value = s.mqtt_uri;
+    $('mq_user').value = s.mqtt_user;
+    $('mq_topic').value = s.mqtt_topic;
+    $('mq_disc').checked = s.mqtt_discovery;
+    $('mq_pfx').value = s.mqtt_ha_prefix;
+    $('mq_int').value = s.mqtt_interval_s;
+    passStored = s.mqtt_pass_set;
+    $('mq_pass').placeholder = passStored ? '\u2022\u2022\u2022\u2022 unchanged' : 'optional';
+
+    $('tb_v').value = s.tube_target_v;
+    $('tb_win').value = s.tube_window_s;
+    $('tb_cpm').value = s.tube_cpm_per_usvh;
+
+    $('spk_vol').value = s.spk_volume;
+    $('spk_snd').value = s.spk_sound;
+    $('lcd_bri').value = s.lcd_brightness;
+    $('lcd_dim').checked = s.lcd_auto_dim;
+    $('led_en').checked = s.led_enabled;
+    $('chg_en').checked = s.batt_charge_en;
+    $('hv_start').checked = s.hv_start_enabled;
+    $('tz_offset').value = String(s.timezone_offset_min / 60);
+    $('tz_dst').checked = s.daylight_saving;
+    $('livewin').value = String(s.history_short_window_s || 300);
+    sliders();
+  } catch (e) { mqttMsg('Could not load settings'); }
+}
+
+/* Only the listed fields are sent, the firmware keeps the rest as they are. */
+async function post(body, btn, out) {
+  $(btn).disabled = true;
+  $(out).textContent = 'Saving\u2026';
+  try {
+    const r = await (await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    })).json();
+    $(out).textContent = r.ok ? 'Saved' : 'Save failed';
+  } catch (e) { $(out).textContent = 'Save failed'; }
+  $(btn).disabled = false;
+}
+
+function sliders() {
+  $('spk_vol_v').textContent = $('spk_vol').value + ' / 200';
+  $('lcd_bri_v').textContent = $('lcd_bri').value + '%';
+}
+$('spk_vol').oninput = sliders;
+$('lcd_bri').oninput = sliders;
+$('hv_duty').oninput = () => { $('hv_duty_v').textContent = $('hv_duty').value + '%'; };
+
+$('mqttsave').onclick = async () => {
+  const body = {
+    device_name: $('dev_name').value,
+    mqtt_enabled: $('mq_en').checked,
+    mqtt_uri: $('mq_uri').value,
+    mqtt_user: $('mq_user').value,
+    mqtt_topic: $('mq_topic').value,
+    mqtt_discovery: $('mq_disc').checked,
+    mqtt_ha_prefix: $('mq_pfx').value,
+    mqtt_interval_s: Number($('mq_int').value)
+  };
+  /* An empty box keeps the stored password, unless none was stored yet. */
+  if ($('mq_pass').value || !passStored) body.mqtt_pass = $('mq_pass').value;
+  await post(body, 'mqttsave', 'mqttmsg');
+  $('mq_pass').value = '';
+  setTimeout(loadSettings, 2000);
+};
+
+$('tubesave').onclick = () => post({
+  tube_target_v: Number($('tb_v').value),
+  tube_window_s: Number($('tb_win').value),
+  tube_cpm_per_usvh: Number($('tb_cpm').value)
+}, 'tubesave', 'tubemsg');
+
+$('hvapply').onclick = async () => {
+  const query = new URLSearchParams({
+    enabled: $('hv_enabled').checked ? '1' : '0',
+    duty_pct: $('hv_duty').value,
+    freq_hz: $('hv_freq').value
+  });
+  $('hvapply').disabled = true;
+  $('hvmsg').textContent = 'Applying...';
+  try {
+    const r = await (await fetch('/api/hv?' + query, { method: 'POST' })).json();
+    $('hvmsg').textContent = r.ok ? 'Applied' : 'Update failed';
+  } catch (e) { $('hvmsg').textContent = 'Update failed'; }
+  $('hvapply').disabled = false;
+};
+
+$('devsave').onclick = () => post({
+  spk_volume: Number($('spk_vol').value),
+  spk_sound: Number($('spk_snd').value),
+  lcd_brightness: Number($('lcd_bri').value),
+  lcd_auto_dim: $('lcd_dim').checked,
+  led_enabled: $('led_en').checked,
+  batt_charge_en: $('chg_en').checked,
+  hv_start_enabled: $('hv_start').checked,
+  timezone_offset_min: Math.round(Number($('tz_offset').value) * 60),
+  daylight_saving: $('tz_dst').checked
+}, 'devsave', 'devmsg');
+
+async function deviceAction(url, button, prompt) {
+  if (!confirm(prompt)) return;
+  $(button).disabled = true;
+  $('devmsg').textContent = 'Restarting...';
+  try {
+    const r = await (await fetch(url, { method: 'POST' })).json();
+    $('devmsg').textContent = r.ok ? 'Restarting...' : 'Request failed';
+  } catch (e) {
+    $('devmsg').textContent = 'Request failed';
+  }
+  $(button).disabled = false;
+}
+
+$('restart').onclick = () => deviceAction('/api/restart', 'restart', 'Restart the device now?');
+$('factoryreset').onclick = () => deviceAction('/api/factory_reset', 'factoryreset',
+  'Erase all saved settings and Wi-Fi credentials, then restart the device?');
+
+$('livewin').onchange = async () => {
+  await post({ history_short_window_s: Number($('livewin').value) }, 'devsave', 'devmsg');
+  historyShort();
+};
+
+$('histrefresh').onclick = historyLong;
+$('histwin').onchange = historyLong;
+
+(async () => {
+  await status();
+  await loadSettings();
+  const tab = location.hash.slice(1);
+  if (document.getElementById(tab)) show(tab);
+  live();
+  historyShort();
+  historyLong();
+  setInterval(live, 1000);
+  setInterval(historyShort, 10000);
+  setInterval(status, 10000);
+  setInterval(() => { if ($('mqtt').classList.contains('on')) loadSettings(false); }, 5000);
+  setInterval(() => { if ($('system').classList.contains('on')) diagnostics(); }, 5000);
+})();
+</script>
+</body>
+</html>

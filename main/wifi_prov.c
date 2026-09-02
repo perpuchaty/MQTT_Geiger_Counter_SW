@@ -1,22 +1,42 @@
 #include "wifi_prov.h"
 
+#include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
+#include <time.h>
 
 #include "blufi_example.h"
+#include "api.h"
 #include "cJSON.h"
+#include "config.h"
+#include "driver/gpio.h"
 #include "esp_blufi.h"
 #include "esp_blufi_api.h"
 #include "esp_check.h"
+#include "esp_chip_info.h"
 #include "esp_http_server.h"
+#include "esp_idf_version.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_private/esp_clk.h"
+#include "esp_system.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/task.h"
+#include "geiger.h"
+#include "history_store.h"
+#include "lcd.h"
 #include "lwip/sockets.h"
+#include "mdns.h"
+#include "mqtt.h"
 #include "nvs_flash.h"
+#include "ota.h"
+#include "settings.h"
 #include "soc/soc_caps.h"
+#include "esp_sntp.h"
 
 static const char *TAG = "wifi";
 
@@ -30,6 +50,33 @@ static httpd_handle_t      s_httpd;
 static int                 s_dns_sock = -1;
 static wifi_prov_method_t  s_running;
 static char                s_ap_ssid[32];
+static esp_timer_handle_t  s_portal_timer;
+static bool                s_sntp_started;
+
+static void portal_stop(void);
+
+static void time_sync_cb(struct timeval *tv)
+{
+    time_t now = time(NULL);
+    struct tm t = {0};
+    localtime_r(&now, &t);
+    ESP_LOGI(TAG, "clock synced: %04d-%02d-%02d %02d:%02d:%02d",
+             t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
+             t.tm_hour, t.tm_min, t.tm_sec);
+}
+
+static void time_sync_start(void)
+{
+    if (s_sntp_started) {
+        return;
+    }
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    sntp_set_time_sync_notification_cb(time_sync_cb);
+    esp_sntp_init();
+    s_sntp_started = true;
+    ESP_LOGI(TAG, "SNTP started");
+}
 
 /* Station state, also reported back over BluFi. */
 static bool     s_sta_connected;
@@ -42,8 +89,8 @@ static uint8_t  s_sta_ssid[32];
 static int      s_sta_ssid_len;
 static esp_blufi_extra_info_t s_conn_info;
 
-extern const char portal_html_start[] asm("_binary_portal_html_start");
-extern const char portal_html_end[]   asm("_binary_portal_html_end");
+extern const char index_html_start[] asm("_binary_index_html_start");
+extern const char index_html_end[]   asm("_binary_index_html_end");
 
 /* =========================================================================
  * Station handling
@@ -138,7 +185,16 @@ static void ip_event_handler(void *arg, esp_event_base_t base, int32_t id, void 
         return;
     }
     s_sta_got_ip = true;
-    ESP_LOGI(TAG, "got ip " IPSTR, IP2STR(&((ip_event_got_ip_t *)data)->ip_info.ip));
+    ESP_LOGI(TAG, "got ip " IPSTR ", web ui on http://" WIFI_MDNS_HOSTNAME ".local",
+             IP2STR(&((ip_event_got_ip_t *)data)->ip_info.ip));
+    time_sync_start();
+    ota_check_on_connect();
+
+    /* Give the portal client a moment to follow the redirect, then drop the SoftAP. */
+    if (WIFI_PORTAL_LINGER_MS > 0 && (s_running & WIFI_PROV_SOFTAP) && s_portal_timer &&
+        !esp_timer_is_active(s_portal_timer)) {
+        esp_timer_start_once(s_portal_timer, (uint64_t)WIFI_PORTAL_LINGER_MS * 1000);
+    }
 
     if (s_ble_connected) {
         wifi_mode_t mode;
@@ -357,7 +413,7 @@ static void blufi_stop(void)
 }
 
 /* =========================================================================
- * SoftAP captive portal
+ * Web UI: landing page + JSON API, served on both the SoftAP and the station
  * ====================================================================== */
 
 static esp_err_t send_json(httpd_req_t *req, cJSON *root)
@@ -368,15 +424,208 @@ static esp_err_t send_json(httpd_req_t *req, cJSON *root)
         return httpd_resp_send_500(req);
     }
     httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     esp_err_t err = httpd_resp_sendstr(req, body);
     cJSON_free(body);
     return err;
 }
 
-static esp_err_t root_get_handler(httpd_req_t *req)
+static esp_err_t live_get_handler(httpd_req_t *req)
 {
-    httpd_resp_set_type(req, "text/html");
-    return httpd_resp_send(req, portal_html_start, portal_html_end - portal_html_start - 1);
+    int hv_mv = 0;
+    int vbat_mv = 0;
+    board_tube_voltage_get_mv(&hv_mv);
+    board_adc_get_mv(BOARD_ADC_VLATCH, &vbat_mv);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "cpm", geiger_cpm());
+    cJSON_AddNumberToObject(root, "usvh", geiger_usvh());
+    cJSON_AddNumberToObject(root, "total", geiger_total());
+    cJSON_AddNumberToObject(root, "hv_mv", hv_mv);
+    cJSON_AddNumberToObject(root, "vbat_mv", vbat_mv);
+    cJSON_AddBoolToObject(root, "hv_ok", board_input_level(BOARD_IN_VTUBE_OK));
+    cJSON_AddBoolToObject(root, "hv_pwm_enabled", board_hv_is_enabled());
+    cJSON_AddNumberToObject(root, "hv_pwm_duty_pct", board_hv_duty_pct());
+    cJSON_AddNumberToObject(root, "hv_pwm_freq_hz", board_hv_freq_hz());
+    cJSON_AddNumberToObject(root, "uptime", esp_timer_get_time() / 1000000);
+    return send_json(req, root);
+}
+
+static const char *gpio_role(gpio_num_t gpio)
+{
+    if (gpio == PIN_LATCH && gpio == PIN_TUBE_CNT) return "latch / tube count";
+    switch (gpio) {
+    case PIN_CHARGE_EN: return "charge enable";
+    case PIN_CHRG: return "charger charging";
+    case PIN_STBY: return "charger standby";
+    case PIN_ADC_VLATCH: return "battery ADC";
+    case PIN_PWM_TUBE: return "tube PWM";
+    case PIN_ADC_TUBE: return "tube ADC";
+    case PIN_VTUBE_OK: return "tube voltage OK";
+    case PIN_LED: return "indicator LED";
+    case PIN_PWM_LCD: return "LCD PWM";
+    case PIN_BUTTON_ENTER: return "button enter";
+    case PIN_BUTTON_LEFT: return "button left";
+    case PIN_BUTTON_RIGHT: return "button right";
+    case PIN_PWM_BUZZER: return "buzzer PWM";
+    case PIN_LCD_CS: return "LCD chip select";
+    case PIN_LCD_RESET: return "LCD reset";
+    case PIN_LCD_A0: return "LCD data/command";
+    case PIN_LCD_DATA0: return "LCD data";
+    case PIN_LCD_CLOCK: return "LCD clock";
+    default: return "unused / reserved";
+    }
+}
+
+static const char *gpio_direction(bool input_enabled, bool output_enabled)
+{
+    if (input_enabled && output_enabled) return "input/output";
+    if (input_enabled) return "input";
+    if (output_enabled) return "output";
+    return "disabled";
+}
+
+static void diagnostics_add_pwm(cJSON *array, const char *name, int gpio, board_pwm_t pwm)
+{
+    board_pwm_status_t status = {0};
+    cJSON *item = cJSON_CreateObject();
+    cJSON_AddStringToObject(item, "name", name);
+    cJSON_AddNumberToObject(item, "gpio", gpio);
+    if (board_pwm_get_status(pwm, &status) == ESP_OK) {
+        cJSON_AddNumberToObject(item, "freq_hz", status.freq_hz);
+        cJSON_AddNumberToObject(item, "duty_pct", status.duty_pct);
+    }
+    cJSON_AddItemToArray(array, item);
+}
+
+static void diagnostics_add_adc(cJSON *array, const char *name, int gpio, board_adc_ch_t channel)
+{
+    int raw = 0;
+    int mv = 0;
+    cJSON *item = cJSON_CreateObject();
+    cJSON_AddStringToObject(item, "name", name);
+    cJSON_AddNumberToObject(item, "gpio", gpio);
+    if (board_adc_get_raw(channel, &raw) == ESP_OK) cJSON_AddNumberToObject(item, "raw", raw);
+    if (board_adc_get_mv(channel, &mv) == ESP_OK) cJSON_AddNumberToObject(item, "mv", mv);
+    cJSON_AddItemToArray(array, item);
+}
+
+static esp_err_t diagnostics_get_handler(httpd_req_t *req)
+{
+    esp_chip_info_t chip;
+    esp_chip_info(&chip);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "uptime_s", esp_timer_get_time() / 1000000);
+    cJSON_AddNumberToObject(root, "cpu_freq_mhz", esp_clk_cpu_freq() / 1000000);
+    cJSON_AddNumberToObject(root, "cores", chip.cores);
+    cJSON_AddNumberToObject(root, "revision", chip.revision);
+    cJSON_AddStringToObject(root, "idf_version", esp_get_idf_version());
+    cJSON_AddNumberToObject(root, "reset_reason", esp_reset_reason());
+    cJSON_AddNumberToObject(root, "heap_free", esp_get_free_heap_size());
+    cJSON_AddNumberToObject(root, "heap_min", esp_get_minimum_free_heap_size());
+    cJSON_AddNumberToObject(root, "tasks", uxTaskGetNumberOfTasks());
+    cJSON_AddNumberToObject(root, "http_stack_free", uxTaskGetStackHighWaterMark(NULL));
+
+    cJSON *pwm = cJSON_AddArrayToObject(root, "pwm");
+    diagnostics_add_pwm(pwm, "Tube HV", PIN_PWM_TUBE, BOARD_PWM_TUBE);
+    diagnostics_add_pwm(pwm, "LCD backlight", PIN_PWM_LCD, BOARD_PWM_LCD);
+    diagnostics_add_pwm(pwm, "Buzzer", PIN_PWM_BUZZER, BOARD_PWM_BUZZER);
+
+    cJSON *adc = cJSON_AddArrayToObject(root, "adc");
+    diagnostics_add_adc(adc, "Battery / latch", PIN_ADC_VLATCH, BOARD_ADC_VLATCH);
+    diagnostics_add_adc(adc, "Tube feedback", PIN_ADC_TUBE, BOARD_ADC_TUBE);
+    int tube_mv = 0;
+    if (board_tube_voltage_get_mv(&tube_mv) == ESP_OK) {
+        cJSON_AddNumberToObject(root, "tube_voltage_mv", tube_mv);
+    }
+
+    cJSON *gpios = cJSON_AddArrayToObject(root, "gpios");
+    for (int pin = 0; pin < GPIO_NUM_MAX; pin++) {
+        if (!GPIO_IS_VALID_GPIO(pin)) continue;
+        gpio_io_config_t io_config = {0};
+        cJSON *item = cJSON_CreateObject();
+        cJSON_AddNumberToObject(item, "gpio", pin);
+        cJSON_AddStringToObject(item, "role", gpio_role((gpio_num_t)pin));
+        if (gpio_get_io_config((gpio_num_t)pin, &io_config) == ESP_OK) {
+            cJSON_AddStringToObject(item, "direction", gpio_direction(io_config.ie, io_config.oe));
+        }
+        cJSON_AddNumberToObject(item, "level", gpio_get_level((gpio_num_t)pin));
+        cJSON_AddItemToArray(gpios, item);
+    }
+    return send_json(req, root);
+}
+
+static esp_err_t history_get_handler(httpd_req_t *req)
+{
+    uint32_t window_s = settings_get()->history_short_window_s;
+    char query[80];
+    if (httpd_req_get_url_query_len(req) > 0 &&
+        httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        char val[16];
+        if (httpd_query_key_value(query, "window_s", val, sizeof(val)) == ESP_OK) {
+            uint32_t parsed = (uint32_t)strtoul(val, NULL, 10);
+            if (parsed >= HISTORY_SHORT_MIN_S && parsed <= HISTORY_SHORT_MAX_S) {
+                window_s = parsed;
+            }
+        }
+    }
+
+    uint32_t now_s = (uint32_t)time(NULL);
+    uint32_t since = (now_s > window_s) ? (now_s - window_s) : 0;
+
+    history_point_t *points = calloc(720, sizeof(history_point_t));
+    if (!points) {
+        return httpd_resp_send_500(req);
+    }
+    size_t n = 0;
+    uint32_t oldest = 0;
+    uint32_t newest = 0;
+    esp_err_t hist_err = history_store_query(since, points, 720, &n, &oldest, &newest);
+    if (hist_err != ESP_OK) {
+        free(points);
+        ESP_LOGE(TAG, "history read failed: %s", esp_err_to_name(hist_err));
+        return httpd_resp_send_500(req);
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "window_s", window_s);
+    cJSON_AddNumberToObject(root, "now", now_s);
+    cJSON_AddNumberToObject(root, "oldest", oldest);
+    cJSON_AddNumberToObject(root, "newest", newest);
+    cJSON_AddNumberToObject(root, "cpm_per_usvh", settings_get()->tube_cpm_per_usvh);
+
+    cJSON *arr = cJSON_AddArrayToObject(root, "cpm");
+    cJSON *ts_arr = cJSON_AddArrayToObject(root, "ts");
+    for (size_t i = 0; i < n; i++) {
+        cJSON_AddItemToArray(arr, cJSON_CreateNumber(points[i].cpm));
+        cJSON_AddItemToArray(ts_arr, cJSON_CreateNumber(points[i].ts));
+    }
+    esp_err_t resp = send_json(req, root);
+    free(points);
+    return resp;
+}
+
+static esp_err_t history_csv_get_handler(httpd_req_t *req)
+{
+    FILE *f = fopen(HISTORY_STORE_FILE_PATH, "r");
+    if (!f) {
+        httpd_resp_set_type(req, "text/plain");
+        return httpd_resp_sendstr(req, "");
+    }
+
+    httpd_resp_set_type(req, "text/csv");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+
+    char chunk[512];
+    while (fgets(chunk, sizeof(chunk), f)) {
+        if (httpd_resp_send_chunk(req, chunk, HTTPD_RESP_USE_STRLEN) != ESP_OK) {
+            fclose(f);
+            return ESP_FAIL;
+        }
+    }
+    fclose(f);
+    return httpd_resp_send_chunk(req, NULL, 0);
 }
 
 static esp_err_t scan_get_handler(httpd_req_t *req)
@@ -409,13 +658,20 @@ static esp_err_t scan_get_handler(httpd_req_t *req)
 static esp_err_t status_get_handler(httpd_req_t *req)
 {
     char ip[16];
+    wifi_config_t saved = {0};
     wifi_get_ip_str(ip, sizeof(ip));
+    bool has_credentials = esp_wifi_get_config(WIFI_IF_STA, &saved) == ESP_OK && saved.sta.ssid[0] != '\0';
 
     cJSON *root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "connected", s_sta_got_ip);
     cJSON_AddBoolToObject(root, "connecting", s_sta_connecting);
+    cJSON_AddBoolToObject(root, "portal", (s_running & WIFI_PROV_SOFTAP) != 0);
+    cJSON_AddBoolToObject(root, "has_credentials", has_credentials);
     cJSON_AddStringToObject(root, "ip", ip);
+    cJSON_AddStringToObject(root, "hostname", WIFI_MDNS_HOSTNAME);
     cJSON_AddStringToObject(root, "ssid", (const char *)s_sta_ssid);
+    cJSON_AddStringToObject(root, "remembered_ssid", has_credentials ? (const char *)saved.sta.ssid : "");
+    cJSON_AddStringToObject(root, "setup_ssid", s_ap_ssid);
     return send_json(req, root);
 }
 
@@ -458,12 +714,238 @@ static esp_err_t connect_post_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
 
-/* Anything else is redirected so phones pop up the captive portal sign-in page. */
+/* -------------------------------------------------------------------------
+ * Persisted settings
+ * ---------------------------------------------------------------------- */
+
+static void json_get_str(const cJSON *root, const char *key, char *dst, size_t len)
+{
+    const cJSON *item = cJSON_GetObjectItem(root, key);
+    if (cJSON_IsString(item)) {
+        strlcpy(dst, item->valuestring, len);
+    }
+}
+
+static void json_get_bool(const cJSON *root, const char *key, bool *dst)
+{
+    const cJSON *item = cJSON_GetObjectItem(root, key);
+    if (cJSON_IsBool(item)) {
+        *dst = cJSON_IsTrue(item);
+    }
+}
+
+static void json_get_u16(const cJSON *root, const char *key, uint16_t *dst)
+{
+    const cJSON *item = cJSON_GetObjectItem(root, key);
+    if (cJSON_IsNumber(item) && item->valuedouble > 0 && item->valuedouble < UINT16_MAX) {
+        *dst = (uint16_t)item->valuedouble;
+    }
+}
+
+static void json_get_i16(const cJSON *root, const char *key, int16_t *dst)
+{
+    const cJSON *item = cJSON_GetObjectItem(root, key);
+    if (cJSON_IsNumber(item) && item->valuedouble >= INT16_MIN && item->valuedouble <= INT16_MAX) {
+        *dst = (int16_t)item->valuedouble;
+    }
+}
+
+static void json_get_u32(const cJSON *root, const char *key, uint32_t *dst)
+{
+    const cJSON *item = cJSON_GetObjectItem(root, key);
+    if (cJSON_IsNumber(item) && item->valuedouble >= 0 && item->valuedouble <= UINT32_MAX) {
+        *dst = (uint32_t)item->valuedouble;
+    }
+}
+
+static void json_get_u8(const cJSON *root, const char *key, uint8_t *dst)
+{
+    const cJSON *item = cJSON_GetObjectItem(root, key);
+    if (cJSON_IsNumber(item) && item->valuedouble >= 0 && item->valuedouble <= UINT8_MAX) {
+        *dst = (uint8_t)item->valuedouble;
+    }
+}
+
+static void json_get_float(const cJSON *root, const char *key, float *dst)
+{
+    const cJSON *item = cJSON_GetObjectItem(root, key);
+    if (cJSON_IsNumber(item)) {
+        *dst = (float)item->valuedouble;
+    }
+}
+
+static esp_err_t settings_get_handler(httpd_req_t *req)
+{
+    const settings_t *cfg = settings_get();
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "device_name", cfg->device_name);
+    cJSON_AddStringToObject(root, "device_id", mqtt_device_id());
+    cJSON_AddBoolToObject(root, "mqtt_enabled", cfg->mqtt_enabled);
+    cJSON_AddStringToObject(root, "mqtt_uri", cfg->mqtt_uri);
+    cJSON_AddStringToObject(root, "mqtt_user", cfg->mqtt_user);
+    cJSON_AddBoolToObject(root, "mqtt_pass_set", cfg->mqtt_pass[0] != '\0');
+    cJSON_AddStringToObject(root, "mqtt_topic", cfg->mqtt_topic);
+    cJSON_AddBoolToObject(root, "mqtt_discovery", cfg->mqtt_discovery);
+    cJSON_AddStringToObject(root, "mqtt_ha_prefix", cfg->mqtt_ha_prefix);
+    cJSON_AddNumberToObject(root, "mqtt_interval_s", cfg->mqtt_interval_s);
+    cJSON_AddStringToObject(root, "mqtt_state", mqtt_state_str());
+    cJSON_AddNumberToObject(root, "tube_window_s", cfg->tube_window_s);
+    cJSON_AddNumberToObject(root, "tube_cpm_per_usvh", cfg->tube_cpm_per_usvh);
+    cJSON_AddNumberToObject(root, "tube_target_v", cfg->tube_target_v);
+    cJSON_AddNumberToObject(root, "spk_volume", cfg->spk_volume);
+    cJSON_AddNumberToObject(root, "spk_sound", cfg->spk_sound);
+    cJSON_AddBoolToObject(root, "batt_charge_en", cfg->batt_charge_en);
+    cJSON_AddBoolToObject(root, "hv_start_enabled", cfg->hv_start_enabled);
+    cJSON_AddBoolToObject(root, "led_enabled", cfg->led_enabled);
+    cJSON_AddNumberToObject(root, "lcd_brightness", cfg->lcd_brightness);
+    cJSON_AddBoolToObject(root, "lcd_auto_dim", cfg->lcd_auto_dim);
+    cJSON_AddNumberToObject(root, "timezone_offset_min", cfg->timezone_offset_min);
+    cJSON_AddBoolToObject(root, "daylight_saving", cfg->daylight_saving);
+    cJSON_AddNumberToObject(root, "history_short_window_s", cfg->history_short_window_s);
+    return send_json(req, root);
+}
+
+static esp_err_t settings_post_handler(httpd_req_t *req)
+{
+    char body[768];
+    if (req->content_len >= sizeof(body)) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "payload too large");
+    }
+    int len = httpd_req_recv(req, body, req->content_len);
+    if (len <= 0) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no payload");
+    }
+    body[len] = '\0';
+
+    cJSON *root = cJSON_Parse(body);
+    if (!root) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid json");
+    }
+
+    /* Fields left out of the request keep their current value. */
+    settings_t cfg = *settings_get();
+    json_get_str(root, "device_name", cfg.device_name, sizeof(cfg.device_name));
+    json_get_bool(root, "mqtt_enabled", &cfg.mqtt_enabled);
+    json_get_str(root, "mqtt_uri", cfg.mqtt_uri, sizeof(cfg.mqtt_uri));
+    json_get_str(root, "mqtt_user", cfg.mqtt_user, sizeof(cfg.mqtt_user));
+    json_get_str(root, "mqtt_pass", cfg.mqtt_pass, sizeof(cfg.mqtt_pass));
+    json_get_str(root, "mqtt_topic", cfg.mqtt_topic, sizeof(cfg.mqtt_topic));
+    json_get_bool(root, "mqtt_discovery", &cfg.mqtt_discovery);
+    json_get_str(root, "mqtt_ha_prefix", cfg.mqtt_ha_prefix, sizeof(cfg.mqtt_ha_prefix));
+    json_get_u16(root, "mqtt_interval_s", &cfg.mqtt_interval_s);
+    json_get_u16(root, "tube_window_s", &cfg.tube_window_s);
+    json_get_float(root, "tube_cpm_per_usvh", &cfg.tube_cpm_per_usvh);
+    json_get_u16(root, "tube_target_v", &cfg.tube_target_v);
+    json_get_u8(root, "spk_volume", &cfg.spk_volume);
+    json_get_u8(root, "spk_sound", &cfg.spk_sound);
+    json_get_bool(root, "batt_charge_en", &cfg.batt_charge_en);
+    json_get_bool(root, "hv_start_enabled", &cfg.hv_start_enabled);
+    json_get_bool(root, "led_enabled", &cfg.led_enabled);
+    json_get_u8(root, "lcd_brightness", &cfg.lcd_brightness);
+    json_get_bool(root, "lcd_auto_dim", &cfg.lcd_auto_dim);
+    json_get_i16(root, "timezone_offset_min", &cfg.timezone_offset_min);
+    json_get_bool(root, "daylight_saving", &cfg.daylight_saving);
+    json_get_u32(root, "history_short_window_s", &cfg.history_short_window_s);
+    cJSON_Delete(root);
+
+    if (settings_save(&cfg) != ESP_OK) {
+        return httpd_resp_send_500(req);
+    }
+    board_apply_settings();
+    lcd_set_backlight(cfg.lcd_brightness);
+    mqtt_apply();
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "ok", true);
+    cJSON_AddStringToObject(resp, "mqtt_state", mqtt_state_str());
+    return send_json(req, resp);
+}
+
+static void restart_cb(void *arg)
+{
+    esp_restart();
+}
+
+static esp_err_t restart_post_handler(httpd_req_t *req)
+{
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "ok", true);
+    ESP_RETURN_ON_ERROR(send_json(req, resp), TAG, "restart response");
+
+    esp_timer_handle_t timer;
+    esp_timer_create_args_t args = {
+        .callback = restart_cb,
+        .name = "restart",
+    };
+    ESP_RETURN_ON_ERROR(esp_timer_create(&args, &timer), TAG, "restart timer");
+    return esp_timer_start_once(timer, 250000);
+}
+
+static esp_err_t factory_reset_post_handler(httpd_req_t *req)
+{
+    if (history_store_format() != ESP_OK) {
+        return httpd_resp_send_500(req);
+    }
+    if (nvs_flash_erase() != ESP_OK) {
+        return httpd_resp_send_500(req);
+    }
+    return restart_post_handler(req);
+}
+
+static esp_err_t forget_wifi_post_handler(httpd_req_t *req)
+{
+    ESP_RETURN_ON_ERROR(wifi_forget(), TAG, "forget wifi");
+    ESP_RETURN_ON_ERROR(wifi_prov_start(WIFI_PROV_SOFTAP), TAG, "start setup portal");
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddStringToObject(root, "setup_ssid", s_ap_ssid);
+    return send_json(req, root);
+}
+
+/* While the portal runs, anything unknown is redirected so phones pop up the sign-in page. */
 static esp_err_t redirect_handler(httpd_req_t *req)
 {
+    if (!(s_running & WIFI_PROV_SOFTAP)) {
+        return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not found");
+    }
     httpd_resp_set_status(req, "302 Found");
     httpd_resp_set_hdr(req, "Location", "http://" WIFI_AP_IP "/");
     return httpd_resp_send(req, NULL, 0);
+}
+
+static bool uri_path_is(const char *uri, const char *path)
+{
+    size_t path_len = strcspn(uri, "?");
+    return strlen(path) == path_len && strncmp(uri, path, path_len) == 0;
+}
+
+static esp_err_t http_request_handler(httpd_req_t *req)
+{
+    esp_err_t err = api_handle_request(req);
+    if (err != ESP_ERR_NOT_FOUND) {
+        return err;
+    }
+
+    if (req->method == HTTP_GET) {
+        if (uri_path_is(req->uri, "/api/live")) return live_get_handler(req);
+        if (uri_path_is(req->uri, "/api/diagnostics")) return diagnostics_get_handler(req);
+        if (uri_path_is(req->uri, "/api/history")) return history_get_handler(req);
+        if (uri_path_is(req->uri, "/api/history_csv")) return history_csv_get_handler(req);
+        if (uri_path_is(req->uri, "/api/scan")) return scan_get_handler(req);
+        if (uri_path_is(req->uri, "/api/status")) return status_get_handler(req);
+        if (uri_path_is(req->uri, "/api/settings")) return settings_get_handler(req);
+        return redirect_handler(req);
+    }
+    if (req->method == HTTP_POST) {
+        if (uri_path_is(req->uri, "/api/settings")) return settings_post_handler(req);
+        if (uri_path_is(req->uri, "/api/connect")) return connect_post_handler(req);
+        if (uri_path_is(req->uri, "/api/forget_wifi")) return forget_wifi_post_handler(req);
+        if (uri_path_is(req->uri, "/api/restart")) return restart_post_handler(req);
+        if (uri_path_is(req->uri, "/api/factory_reset")) return factory_reset_post_handler(req);
+    }
+    return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not found");
 }
 
 /* =========================================================================
@@ -608,6 +1090,44 @@ static void dns_stop(void)
     }
 }
 
+static esp_err_t http_start(void)
+{
+    httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
+    cfg.server_port      = WIFI_HTTP_PORT;
+    cfg.max_uri_handlers = 1;
+    cfg.stack_size       = 8192;
+    cfg.lru_purge_enable = true;
+    cfg.uri_match_fn     = httpd_uri_match_wildcard;
+    ESP_RETURN_ON_ERROR(httpd_start(&s_httpd, &cfg), TAG, "httpd");
+
+    const httpd_uri_t route = {
+        .uri = "/*",
+        .method = HTTP_ANY,
+        .handler = http_request_handler,
+    };
+    return httpd_register_uri_handler(s_httpd, &route);
+}
+
+static esp_err_t mdns_start(void)
+{
+    ESP_RETURN_ON_ERROR(mdns_init(), TAG, "mdns init");
+    ESP_RETURN_ON_ERROR(mdns_hostname_set(WIFI_MDNS_HOSTNAME), TAG, "mdns hostname");
+    ESP_RETURN_ON_ERROR(mdns_instance_name_set(WIFI_MDNS_INSTANCE), TAG, "mdns instance");
+
+    mdns_txt_item_t txt[] = { { "path", "/" } };
+    ESP_RETURN_ON_ERROR(mdns_service_add(NULL, "_http", "_tcp", WIFI_HTTP_PORT, txt, 1), TAG, "mdns service");
+    return ESP_OK;
+}
+
+static void portal_linger_cb(void *arg)
+{
+    if (s_running & WIFI_PROV_SOFTAP) {
+        ESP_LOGI(TAG, "station is up, closing the captive portal");
+        portal_stop();
+        s_running &= ~WIFI_PROV_SOFTAP;
+    }
+}
+
 static esp_err_t portal_start(void)
 {
     wifi_config_t ap = {
@@ -631,24 +1151,6 @@ static esp_err_t portal_start(void)
     esp_netif_dhcps_option(s_ap_netif, ESP_NETIF_OP_SET, ESP_NETIF_CAPTIVEPORTAL_URI, uri, sizeof(uri));
     esp_netif_dhcps_start(s_ap_netif);
 
-    httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 8;
-    cfg.lru_purge_enable = true;
-    cfg.uri_match_fn     = httpd_uri_match_wildcard;
-    ESP_RETURN_ON_ERROR(httpd_start(&s_httpd, &cfg), TAG, "httpd");
-
-    /* Order matters: the wildcard entry must be registered last. */
-    static const httpd_uri_t routes[] = {
-        { .uri = "/",        .method = HTTP_GET,  .handler = root_get_handler },
-        { .uri = "/scan",    .method = HTTP_GET,  .handler = scan_get_handler },
-        { .uri = "/status",  .method = HTTP_GET,  .handler = status_get_handler },
-        { .uri = "/connect", .method = HTTP_POST, .handler = connect_post_handler },
-        { .uri = "/*",       .method = HTTP_GET,  .handler = redirect_handler },
-    };
-    for (int i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
-        ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_httpd, &routes[i]), TAG, "route %s", routes[i].uri);
-    }
-
     ESP_RETURN_ON_ERROR(dns_start(), TAG, "dns");
 
     ESP_LOGI(TAG, "portal up: connect to \"%s\" then open http://%s", s_ap_ssid, WIFI_AP_IP);
@@ -658,10 +1160,6 @@ static esp_err_t portal_start(void)
 static void portal_stop(void)
 {
     dns_stop();
-    if (s_httpd) {
-        httpd_stop(s_httpd);
-        s_httpd = NULL;
-    }
     esp_wifi_set_mode(WIFI_MODE_STA);
 }
 
@@ -684,6 +1182,7 @@ esp_err_t wifi_prov_init(void)
     s_sta_netif = esp_netif_create_default_wifi_sta();
     s_ap_netif  = esp_netif_create_default_wifi_ap();
     ESP_RETURN_ON_FALSE(s_sta_netif && s_ap_netif, ESP_FAIL, TAG, "netif create");
+    esp_netif_set_hostname(s_sta_netif, WIFI_MDNS_HOSTNAME);
 
     ESP_RETURN_ON_ERROR(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL),
                         TAG, "wifi events");
@@ -700,7 +1199,16 @@ esp_err_t wifi_prov_init(void)
     snprintf(s_ap_ssid, sizeof(s_ap_ssid), "%s-%02X%02X%02X", WIFI_AP_SSID_PREFIX, mac[3], mac[4], mac[5]);
 
     record_conn_info(INVALID_RSSI, INVALID_REASON);
-    return esp_wifi_start();
+    ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "wifi start");
+
+    ESP_RETURN_ON_ERROR(mdns_start(), TAG, "mdns start");
+    ESP_RETURN_ON_ERROR(http_start(), TAG, "http start");
+
+    const esp_timer_create_args_t timer = { .callback = portal_linger_cb, .name = "portal" };
+    ESP_RETURN_ON_ERROR(esp_timer_create(&timer, &s_portal_timer), TAG, "portal timer");
+
+    ESP_LOGI(TAG, "web ui on http://" WIFI_MDNS_HOSTNAME ".local");
+    return ESP_OK;
 }
 
 esp_err_t wifi_prov_start(wifi_prov_method_t methods)
@@ -738,6 +1246,11 @@ bool wifi_is_connected(void)
     return s_sta_got_ip;
 }
 
+bool wifi_is_bluetooth_connected(void)
+{
+    return s_ble_connected;
+}
+
 bool wifi_has_credentials(void)
 {
     wifi_config_t cfg;
@@ -748,7 +1261,14 @@ esp_err_t wifi_forget(void)
 {
     wifi_config_t empty = {0};
     esp_wifi_disconnect();
-    return esp_wifi_set_config(WIFI_IF_STA, &empty);
+    esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &empty);
+    if (err == ESP_OK) {
+        s_sta_connecting = false;
+        s_sta_got_ip = false;
+        s_sta_ssid_len = 0;
+        memset(s_sta_ssid, 0, sizeof(s_sta_ssid));
+    }
+    return err;
 }
 
 void wifi_get_ip_str(char *buf, size_t len)

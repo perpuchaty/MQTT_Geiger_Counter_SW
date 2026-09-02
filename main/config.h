@@ -17,6 +17,9 @@ extern "C" {
 /* -------------------------------------------------------------------------
  * Pinout
  * ---------------------------------------------------------------------- */
+#define TARGET_CPU ESP32C6
+
+#if defined(TARGET_CPU) && TARGET_CPU == ESP32C6
 #define PIN_LATCH GPIO_NUM_0 //output
 #define PIN_CHARGE_EN GPIO_NUM_1 //output
 #define PIN_CHRG GPIO_NUM_2 //input
@@ -37,31 +40,37 @@ extern "C" {
 #define PIN_LCD_A0 GPIO_NUM_21//output lcd ST7565P
 #define PIN_LCD_DATA0 GPIO_NUM_22//output lcd ST7565P
 #define PIN_LCD_CLOCK GPIO_NUM_23//output lcd ST7565P
+#endif
+
 
 /* -------------------------------------------------------------------------
  * LCD - ST7565P over hardware SPI (u8g2, full framebuffer mode)
  * ---------------------------------------------------------------------- */
 #define LCD_SPI_HOST            SPI2_HOST          /* GPSPI2: the only general purpose host on C6 */
-#define LCD_SPI_CLOCK_HZ        (10 * 1000 * 1000)
+#define LCD_SPI_CLOCK_HZ        (1 * 1000 * 1000)
 #define LCD_SPI_MODE            0
 #define LCD_WIDTH               128
 #define LCD_HEIGHT              64
-#define LCD_U8G2_SETUP          u8g2_Setup_st7565_erc12864_f
+#define LCD_U8G2_SETUP          u8g2_Setup_st7565_erc12864_alt_f
 #define LCD_U8G2_ROTATION       U8G2_R0
-#define LCD_CONTRAST_DEFAULT    140
+#define LCD_CONTRAST_DEFAULT    32              /* tune for the fitted LCD panel */
 
 /* -------------------------------------------------------------------------
  * PWM (LEDC). ESP32-C6 only implements the low speed mode.
  * ---------------------------------------------------------------------- */
 #define PWM_SPEED_MODE          LEDC_LOW_SPEED_MODE
-#define PWM_CLK_SRC             LEDC_AUTO_CLK
+#define PWM_CLK_SRC             LEDC_USE_PLL_DIV_CLK
 
 /* Geiger tube HV boost converter */
 #define PWM_TUBE_TIMER          LEDC_TIMER_0
 #define PWM_TUBE_CHANNEL        LEDC_CHANNEL_0
 #define PWM_TUBE_RES            LEDC_TIMER_10_BIT
-#define PWM_TUBE_FREQ_HZ        40000
-#define PWM_TUBE_DUTY_MAX_PCT   40.0f              /* hard limit, protects inductor and FET */
+#define PWM_TUBE_FREQ_HZ        1000
+#define PWM_TUBE_STARTUP_DUTY_PCT 30.0f
+#define PWM_TUBE_DUTY_MAX_PCT   35.0f              /* hard limit, protects inductor and FET */
+#define HV_REGULATOR_INTERVAL_MS 500
+#define HV_REGULATOR_STEP_PCT   1.0f
+#define HV_REGULATOR_DEADBAND_MV 5000
 
 /* LCD backlight */
 #define PWM_BACKLIGHT_TIMER     LEDC_TIMER_1
@@ -73,7 +82,10 @@ extern "C" {
 #define PWM_BUZZER_TIMER        LEDC_TIMER_2
 #define PWM_BUZZER_CHANNEL      LEDC_CHANNEL_2
 #define PWM_BUZZER_RES          LEDC_TIMER_10_BIT
-#define PWM_BUZZER_FREQ_HZ      2700
+#define PWM_BUZZER_FREQ_HZ      2500
+#define BUZZER_CLICK_SHORT_MS    5
+#define BUZZER_CLICK_NORMAL_MS   20
+#define BUZZER_CLICK_LONG_MS     50
 
 /* -------------------------------------------------------------------------
  * ADC - continuous (DMA) mode with hardware calibration
@@ -83,6 +95,8 @@ extern "C" {
 #define BOARD_ADC_FRAME_BYTES   256                /* must be a multiple of 4 */
 #define BOARD_ADC_POOL_BYTES    1024
 #define BOARD_ADC_IIR_SHIFT     5                  /* averaging time constant: 32 samples/channel */
+#define TUBE_DIVIDER_TOP_OHM    80000000UL
+#define TUBE_DIVIDER_BOTTOM_OHM 510000UL
 
 typedef enum {
     BOARD_ADC_VLATCH = 0,   /* PIN_ADC_VLATCH - battery / latch rail */
@@ -107,10 +121,25 @@ typedef enum {
 /** Called from ISR context: keep it short and ISR safe. */
 typedef void (*board_input_isr_t)(board_input_t input, bool level, void *arg);
 
+typedef enum {
+    BOARD_PWM_TUBE = 0,
+    BOARD_PWM_LCD,
+    BOARD_PWM_BUZZER,
+    BOARD_PWM_COUNT,
+} board_pwm_t;
+
+typedef struct {
+    uint32_t freq_hz;
+    float duty_pct;
+} board_pwm_status_t;
+
 /* -------------------------------------------------------------------------
  * API
  * ---------------------------------------------------------------------- */
 esp_err_t board_init(void);
+
+/** Pushes the persisted settings (charging, LED, backlight) to the hardware. */
+void board_apply_settings(void);
 
 /* Outputs */
 void board_set_latch(bool on);
@@ -126,15 +155,23 @@ uint32_t board_tube_pulses(void);
 /* PWM */
 esp_err_t board_hv_set_duty(float duty_pct);
 esp_err_t board_hv_set_freq(uint32_t freq_hz);
+esp_err_t board_hv_set_enabled(bool enabled);
+esp_err_t board_hv_regulator_start(void);
+bool board_hv_is_enabled(void);
+float board_hv_duty_pct(void);
+float board_hv_output_duty_pct(void);
+uint32_t board_hv_freq_hz(void);
+esp_err_t board_pwm_get_status(board_pwm_t pwm, board_pwm_status_t *status);
 esp_err_t board_backlight_set(uint8_t duty_pct);
-esp_err_t board_buzzer_on(uint32_t freq_hz, uint8_t duty_pct);
+esp_err_t board_buzzer_on(uint32_t freq_hz, uint8_t duty_level);
 esp_err_t board_buzzer_off(void);
 
 /* ADC, values are refreshed continuously in the background */
 esp_err_t board_adc_get_raw(board_adc_ch_t ch, int *raw);
 esp_err_t board_adc_get_mv(board_adc_ch_t ch, int *mv);
+esp_err_t board_tube_voltage_get_mv(int *mv);
 
-/* LCD */
+/* LCD, NULL when the display pins are set to -1 */
 u8g2_t *board_lcd(void);
 
 #ifdef __cplusplus

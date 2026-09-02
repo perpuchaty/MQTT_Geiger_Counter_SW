@@ -1,0 +1,194 @@
+menu "Geiger Counter"
+
+    config GEIGER_DEVICE_NAME
+        string "Device name"
+        default "Geiger Counter"
+        help
+            Shown in the web UI and used as the Home Assistant device name.
+            Can be changed at runtime, the value here is only the default.
+
+    menu "Wi-Fi provisioning"
+
+        config GEIGER_AP_SSID_PREFIX
+            string "SoftAP SSID prefix"
+            default "esp32"
+            help
+                The advertised SSID is this prefix followed by the last three
+                bytes of the station MAC address.
+
+        config GEIGER_AP_PASSWORD
+            string "SoftAP password"
+            default ""
+            help
+                At least 8 characters to enable WPA2, or empty for an open network.
+
+        config GEIGER_AP_CHANNEL
+            int "SoftAP channel"
+            range 1 13
+            default 1
+
+        config GEIGER_AP_MAX_CONN
+            int "SoftAP maximum connections"
+            range 1 10
+            default 4
+
+        config GEIGER_AP_IP
+            string "SoftAP IPv4 address"
+            default "192.168.4.1"
+            help
+                Address the captive portal redirects to. Must match the DHCP
+                server configured for the AP netif.
+
+        config GEIGER_STA_MAX_RETRY
+            int "Station connection retries"
+            range 1 20
+            default 5
+
+        config GEIGER_PORTAL_LINGER_MS
+            int "SoftAP linger time after the station connects (ms)"
+            default 60000
+            help
+                Set to 0 to keep the SoftAP running forever.
+
+    endmenu
+
+    menu "Web UI"
+
+        config GEIGER_MDNS_HOSTNAME
+            string "mDNS hostname"
+            default "geigercounter"
+            help
+                The device is reachable as <hostname>.local.
+
+        config GEIGER_MDNS_INSTANCE
+            string "mDNS instance name"
+            default "Geiger Counter"
+
+        config GEIGER_HTTP_PORT
+            int "HTTP server port"
+            range 1 65535
+            default 80
+
+        config GEIGER_HISTORY_SHORT_WINDOW_S
+            int "Live tab history span (s)"
+            range 60 1728000
+            default 300
+
+    endmenu
+
+    menu "Firmware update"
+
+        config GEIGER_OTA_URL
+            string "OTA firmware image URL"
+            default ""
+            help
+                Direct HTTP or HTTPS URL of the application .bin image. The
+                device checks this image whenever Wi-Fi obtains an IP address.
+                Leave empty to disable OTA checks.
+
+    endmenu
+
+    menu "MQTT / Home Assistant"
+
+        comment "Defaults only, every value can be changed from the web UI"
+
+        config GEIGER_MQTT_ENABLED
+            bool "Enable MQTT by default"
+            default n
+
+        config GEIGER_MQTT_URI
+            string "Broker URI"
+            default "mqtt://homeassistant.local:1883"
+            help
+                mqtt://host:port, mqtts://host:port or ws://host:port/path.
+
+        config GEIGER_MQTT_USER
+            string "Broker username"
+            default ""
+
+        config GEIGER_MQTT_PASS
+            string "Broker password"
+            default ""
+
+        config GEIGER_MQTT_TOPIC
+            string "Base topic"
+            default "geiger"
+            help
+                Topics are <base>/<device-id>/state and <base>/<device-id>/status.
+
+        config GEIGER_MQTT_HA_DISCOVERY
+            bool "Publish Home Assistant discovery"
+            default y
+
+        config GEIGER_MQTT_HA_PREFIX
+            string "Home Assistant discovery prefix"
+            default "homeassistant"
+
+        config GEIGER_MQTT_INTERVAL_S
+            int "State publish interval (s)"
+            range 1 3600
+            default 30
+
+    endmenu
+
+    menu "Tube / measurement"
+
+        comment "Defaults only, every value can be changed from the web UI"
+
+        config GEIGER_TUBE_WINDOW_S
+            int "Sliding window used to derive CPM (s)"
+            range 5 300
+            default 60
+
+        config GEIGER_TUBE_CPM_PER_USVH_X10
+            int "Tube sensitivity, CPM per uSv/h x10"
+            range 10 100000
+            default 1538
+            help
+                Counts per minute that correspond to 1 uSv/h, multiplied by ten.
+                1538 means 153.8 CPM per uSv/h, which is the SBM-20 figure.
+
+        config GEIGER_TUBE_TARGET_V
+            int "Tube target voltage (V)"
+            range 200 600
+            default 400
+
+    endmenu
+
+    menu "Speaker, LED and display"
+
+        comment "Defaults only, every value can be changed from the web UI"
+
+        config GEIGER_SPK_VOLUME
+            int "Buzzer duty level (100 is loudest)"
+            range 0 200
+            default 60
+            help
+                Maps 0..200 to 0..100 percent PWM duty. A passive buzzer is
+                loudest at level 100, which produces a 50 percent duty cycle.
+
+        config GEIGER_SPK_SOUND
+            int "Click length: 0 short (5 ms), 1 normal (20 ms), 2 long (50 ms)"
+            range 0 2
+            default 1
+
+        config GEIGER_BATT_CHARGE_EN
+            bool "Enable battery charging"
+            default y
+
+        config GEIGER_LED_ENABLED
+            bool "Enable the indicator LED"
+            default y
+
+        config GEIGER_LCD_BRIGHTNESS
+            int "LCD backlight brightness (%)"
+            range 0 100
+            default 70
+
+        config GEIGER_LCD_AUTO_DIM
+            bool "Dim the LCD backlight when idle"
+            default y
+
+    endmenu
+
+endmenu

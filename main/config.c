@@ -12,6 +12,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "hal/adc_types.h"
+#include "settings.h"
 #include "soc/soc_caps.h"
 
 static const char *TAG = "board";
@@ -20,21 +21,15 @@ static const char *TAG = "board";
  * GPIO
  * ====================================================================== */
 
-typedef struct {
-    gpio_num_t      pin;
-    gpio_int_type_t intr;
-    bool            pullup;
-} board_input_desc_t;
-
 /* Kept in RAM so the ISR never touches flash. */
-static board_input_desc_t s_in_desc[BOARD_IN_COUNT] = {
-    [BOARD_IN_CHRG]      = { PIN_CHRG,         GPIO_INTR_ANYEDGE, true  },
-    [BOARD_IN_STBY]      = { PIN_STBY,         GPIO_INTR_ANYEDGE, true  },
-    [BOARD_IN_TUBE_CNT]  = { PIN_TUBE_CNT,     GPIO_INTR_NEGEDGE, true  },
-    [BOARD_IN_VTUBE_OK]  = { PIN_VTUBE_OK,     GPIO_INTR_ANYEDGE, false },
-    [BOARD_IN_BTN_ENTER] = { PIN_BUTTON_ENTER, GPIO_INTR_ANYEDGE, true  },
-    [BOARD_IN_BTN_LEFT]  = { PIN_BUTTON_LEFT,  GPIO_INTR_ANYEDGE, true  },
-    [BOARD_IN_BTN_RIGHT] = { PIN_BUTTON_RIGHT, GPIO_INTR_ANYEDGE, true  },
+static const gpio_num_t s_in_pin[BOARD_IN_COUNT] = {
+    [BOARD_IN_CHRG]      = PIN_CHRG,
+    [BOARD_IN_STBY]      = PIN_STBY,
+    [BOARD_IN_TUBE_CNT]  = PIN_TUBE_CNT,
+    [BOARD_IN_VTUBE_OK]  = PIN_VTUBE_OK,
+    [BOARD_IN_BTN_ENTER] = PIN_BUTTON_ENTER,
+    [BOARD_IN_BTN_LEFT]  = PIN_BUTTON_LEFT,
+    [BOARD_IN_BTN_RIGHT] = PIN_BUTTON_RIGHT,
 };
 
 static board_input_isr_t s_in_cb[BOARD_IN_COUNT];
@@ -45,7 +40,7 @@ static portMUX_TYPE      s_in_lock = portMUX_INITIALIZER_UNLOCKED;
 static void IRAM_ATTR board_gpio_isr(void *arg)
 {
     board_input_t in = (board_input_t)(uintptr_t)arg;
-    bool level = gpio_get_level(s_in_desc[in].pin);
+    bool level = gpio_get_level(s_in_pin[in]);
 
     if (in == BOARD_IN_TUBE_CNT) {
         s_tube_pulses++;
@@ -63,7 +58,7 @@ static esp_err_t gpio_init(void)
         .mode         = GPIO_MODE_OUTPUT,
         .intr_type    = GPIO_INTR_DISABLE,
     };
-    ESP_RETURN_ON_ERROR(gpio_config(&out), TAG, "output config failed");
+        ESP_RETURN_ON_ERROR(gpio_config(&out), TAG, "output config failed");
 
     gpio_set_level(PIN_LATCH, 0);
     gpio_set_level(PIN_CHARGE_EN, 0);
@@ -71,25 +66,49 @@ static esp_err_t gpio_init(void)
     gpio_set_level(PIN_LCD_RESET, 0);
     gpio_set_level(PIN_LCD_A0, 0);
 
-    for (int i = 0; i < BOARD_IN_COUNT; i++) {
-        gpio_config_t in = {
-            .pin_bit_mask = BIT64(s_in_desc[i].pin),
-            .mode         = GPIO_MODE_INPUT,
-            .pull_up_en   = s_in_desc[i].pullup ? GPIO_PULLUP_ENABLE : GPIO_PULLUP_DISABLE,
-            .pull_down_en = GPIO_PULLDOWN_DISABLE,
-            .intr_type    = s_in_desc[i].intr,
-        };
-        ESP_RETURN_ON_ERROR(gpio_config(&in), TAG, "input %d config failed", i);
-    }
+    gpio_config_t inputs_pullup = {
+        .pin_bit_mask = BIT64(PIN_CHRG) | BIT64(PIN_STBY) | BIT64(PIN_TUBE_CNT) |
+                        BIT64(PIN_BUTTON_ENTER) | BIT64(PIN_BUTTON_LEFT) | BIT64(PIN_BUTTON_RIGHT),
+        .mode         = GPIO_MODE_INPUT,
+        .pull_up_en   = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    ESP_RETURN_ON_ERROR(gpio_config(&inputs_pullup), TAG, "pull-up input config failed");
+
+    gpio_config_t input_no_pull = {
+        .pin_bit_mask = BIT64(PIN_VTUBE_OK),
+        .mode         = GPIO_MODE_INPUT,
+        .pull_up_en   = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    ESP_RETURN_ON_ERROR(gpio_config(&input_no_pull), TAG, "tube voltage input config failed");
 
     esp_err_t err = gpio_install_isr_service(ESP_INTR_FLAG_LEVEL1);
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
         return err;
     }
-    for (int i = 0; i < BOARD_IN_COUNT; i++) {
-        ESP_RETURN_ON_ERROR(gpio_isr_handler_add(s_in_desc[i].pin, board_gpio_isr, (void *)(uintptr_t)i),
-                            TAG, "isr add %d failed", i);
-    }
+    gpio_set_intr_type(PIN_CHRG, GPIO_INTR_ANYEDGE);
+    gpio_isr_handler_add(PIN_CHRG, board_gpio_isr, (void *)(uintptr_t)BOARD_IN_CHRG);
+
+    gpio_set_intr_type(PIN_STBY, GPIO_INTR_ANYEDGE);
+    gpio_isr_handler_add(PIN_STBY, board_gpio_isr, (void *)(uintptr_t)BOARD_IN_STBY);
+
+    gpio_set_intr_type(PIN_TUBE_CNT, GPIO_INTR_NEGEDGE);
+    gpio_isr_handler_add(PIN_TUBE_CNT, board_gpio_isr, (void *)(uintptr_t)BOARD_IN_TUBE_CNT);
+
+    gpio_set_intr_type(PIN_VTUBE_OK, GPIO_INTR_ANYEDGE);
+    gpio_isr_handler_add(PIN_VTUBE_OK, board_gpio_isr, (void *)(uintptr_t)BOARD_IN_VTUBE_OK);
+
+    gpio_set_intr_type(PIN_BUTTON_ENTER, GPIO_INTR_ANYEDGE);
+    gpio_isr_handler_add(PIN_BUTTON_ENTER, board_gpio_isr, (void *)(uintptr_t)BOARD_IN_BTN_ENTER);
+
+    gpio_set_intr_type(PIN_BUTTON_LEFT, GPIO_INTR_ANYEDGE);
+    gpio_isr_handler_add(PIN_BUTTON_LEFT, board_gpio_isr, (void *)(uintptr_t)BOARD_IN_BTN_LEFT);
+    
+    gpio_set_intr_type(PIN_BUTTON_RIGHT, GPIO_INTR_ANYEDGE);
+    gpio_isr_handler_add(PIN_BUTTON_RIGHT, board_gpio_isr, (void *)(uintptr_t)BOARD_IN_BTN_RIGHT);
     return ESP_OK;
 }
 
@@ -102,7 +121,7 @@ bool board_input_level(board_input_t in)
     if (in >= BOARD_IN_COUNT) {
         return false;
     }
-    return gpio_get_level(s_in_desc[in].pin) != 0;
+    return gpio_get_level(s_in_pin[in]) != 0;
 }
 
 esp_err_t board_input_set_isr(board_input_t in, board_input_isr_t cb, void *arg)
@@ -123,6 +142,9 @@ uint32_t board_tube_pulses(void)
 /* =========================================================================
  * PWM (LEDC)
  * ====================================================================== */
+
+static float s_hv_duty_pct;
+static bool s_hv_enabled;
 
 static uint32_t duty_from_pct(ledc_timer_bit_t res, float pct)
 {
@@ -174,15 +196,107 @@ static esp_err_t pwm_apply(ledc_channel_t ch, uint32_t duty)
 
 esp_err_t board_hv_set_duty(float duty_pct)
 {
+    if (duty_pct < 0.0f) {
+        duty_pct = 0.0f;
+    }
     if (duty_pct > PWM_TUBE_DUTY_MAX_PCT) {
         duty_pct = PWM_TUBE_DUTY_MAX_PCT;
     }
-    return pwm_apply(PWM_TUBE_CHANNEL, duty_from_pct(PWM_TUBE_RES, duty_pct));
+    ESP_RETURN_ON_ERROR(pwm_apply(PWM_TUBE_CHANNEL,
+                                  duty_from_pct(PWM_TUBE_RES, s_hv_enabled ? duty_pct : 0.0f)),
+                        TAG, "hv duty");
+    s_hv_duty_pct = duty_pct;
+    return ESP_OK;
+}
+
+esp_err_t board_hv_set_enabled(bool enabled)
+{
+    s_hv_enabled = enabled;
+    return pwm_apply(PWM_TUBE_CHANNEL,
+                     duty_from_pct(PWM_TUBE_RES, enabled ? s_hv_duty_pct : 0.0f));
+}
+
+bool board_hv_is_enabled(void)
+{
+    return s_hv_enabled;
 }
 
 esp_err_t board_hv_set_freq(uint32_t freq_hz)
 {
-    return ledc_set_freq(PWM_SPEED_MODE, PWM_TUBE_TIMER, freq_hz);
+    ESP_RETURN_ON_FALSE(freq_hz >= 100 && freq_hz <= 100000, ESP_ERR_INVALID_ARG, TAG, "hv frequency");
+    ESP_RETURN_ON_ERROR(ledc_set_freq(PWM_SPEED_MODE, PWM_TUBE_TIMER, freq_hz), TAG, "hv frequency");
+    return ESP_OK;
+}
+
+float board_hv_duty_pct(void)
+{
+    return s_hv_duty_pct;
+}
+
+float board_hv_output_duty_pct(void)
+{
+    const uint32_t max_duty = (1u << (uint32_t)PWM_TUBE_RES) - 1u;
+    return ledc_get_duty(PWM_SPEED_MODE, PWM_TUBE_CHANNEL) * 100.0f / max_duty;
+}
+
+uint32_t board_hv_freq_hz(void)
+{
+    return ledc_get_freq(PWM_SPEED_MODE, PWM_TUBE_TIMER);
+}
+
+esp_err_t board_pwm_get_status(board_pwm_t pwm, board_pwm_status_t *status)
+{
+    static const ledc_timer_t timers[BOARD_PWM_COUNT] = {
+        [BOARD_PWM_TUBE] = PWM_TUBE_TIMER,
+        [BOARD_PWM_LCD] = PWM_BACKLIGHT_TIMER,
+        [BOARD_PWM_BUZZER] = PWM_BUZZER_TIMER,
+    };
+    static const ledc_channel_t channels[BOARD_PWM_COUNT] = {
+        [BOARD_PWM_TUBE] = PWM_TUBE_CHANNEL,
+        [BOARD_PWM_LCD] = PWM_BACKLIGHT_CHANNEL,
+        [BOARD_PWM_BUZZER] = PWM_BUZZER_CHANNEL,
+    };
+    static const ledc_timer_bit_t resolutions[BOARD_PWM_COUNT] = {
+        [BOARD_PWM_TUBE] = PWM_TUBE_RES,
+        [BOARD_PWM_LCD] = PWM_BACKLIGHT_RES,
+        [BOARD_PWM_BUZZER] = PWM_BUZZER_RES,
+    };
+
+    ESP_RETURN_ON_FALSE(pwm < BOARD_PWM_COUNT && status, ESP_ERR_INVALID_ARG, TAG, "bad pwm");
+    uint32_t max_duty = (1u << (uint32_t)resolutions[pwm]) - 1u;
+    status->freq_hz = ledc_get_freq(PWM_SPEED_MODE, timers[pwm]);
+    status->duty_pct = ledc_get_duty(PWM_SPEED_MODE, channels[pwm]) * 100.0f / max_duty;
+    return ESP_OK;
+}
+
+static void hv_regulator_task(void *arg)
+{
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(HV_REGULATOR_INTERVAL_MS));
+        if (!board_hv_is_enabled()) {
+            continue;
+        }
+
+        int voltage_mv;
+        if (board_tube_voltage_get_mv(&voltage_mv) != ESP_OK) {
+            continue;
+        }
+
+        int target_mv = settings_get()->tube_target_v * 1000;
+        float duty_pct = board_hv_duty_pct();
+        if (voltage_mv < target_mv - HV_REGULATOR_DEADBAND_MV) {
+            board_hv_set_duty(duty_pct + HV_REGULATOR_STEP_PCT);
+        } else if (voltage_mv > target_mv + HV_REGULATOR_DEADBAND_MV) {
+            board_hv_set_duty(duty_pct - HV_REGULATOR_STEP_PCT);
+        }
+    }
+}
+
+esp_err_t board_hv_regulator_start(void)
+{
+    return xTaskCreate(hv_regulator_task, "hv_regulator", 2048, NULL, 5, NULL) == pdPASS
+               ? ESP_OK
+               : ESP_ERR_NO_MEM;
 }
 
 esp_err_t board_backlight_set(uint8_t duty_pct)
@@ -190,12 +304,16 @@ esp_err_t board_backlight_set(uint8_t duty_pct)
     return pwm_apply(PWM_BACKLIGHT_CHANNEL, duty_from_pct(PWM_BACKLIGHT_RES, duty_pct));
 }
 
-esp_err_t board_buzzer_on(uint32_t freq_hz, uint8_t duty_pct)
+esp_err_t board_buzzer_on(uint32_t freq_hz, uint8_t duty_level)
 {
     if (freq_hz) {
         ESP_RETURN_ON_ERROR(ledc_set_freq(PWM_SPEED_MODE, PWM_BUZZER_TIMER, freq_hz), TAG, "buzzer freq");
     }
-    return pwm_apply(PWM_BUZZER_CHANNEL, duty_from_pct(PWM_BUZZER_RES, duty_pct));
+    if (duty_level > 200) {
+        duty_level = 200;
+    }
+    return pwm_apply(PWM_BUZZER_CHANNEL,
+                     duty_from_pct(PWM_BUZZER_RES, duty_level / 2.0f));
 }
 
 esp_err_t board_buzzer_off(void)
@@ -343,6 +461,17 @@ esp_err_t board_adc_get_mv(board_adc_ch_t ch, int *mv)
     return adc_cali_raw_to_voltage(s_adc_cali[ch], raw, mv);
 }
 
+esp_err_t board_tube_voltage_get_mv(int *mv)
+{
+    int divider_mv;
+    ESP_RETURN_ON_FALSE(mv, ESP_ERR_INVALID_ARG, TAG, "null voltage output");
+    ESP_RETURN_ON_ERROR(board_adc_get_mv(BOARD_ADC_TUBE, &divider_mv), TAG, "tube divider voltage");
+
+    *mv = (int)(((int64_t)divider_mv * (TUBE_DIVIDER_TOP_OHM + TUBE_DIVIDER_BOTTOM_OHM) +
+                 TUBE_DIVIDER_BOTTOM_OHM / 2) / TUBE_DIVIDER_BOTTOM_OHM);
+    return ESP_OK;
+}
+
 /* =========================================================================
  * LCD - ST7565P on hardware SPI, driven through u8g2
  * ====================================================================== */
@@ -382,7 +511,7 @@ static uint8_t u8x8_byte_esp_spi(u8x8_t *u8x8, uint8_t msg, uint8_t arg_int, voi
     }
     case U8X8_MSG_BYTE_SET_DC:
         lcd_flush();  /* A0 may only change between transfers */
-        gpio_set_level(PIN_LCD_A0, arg_int);
+            gpio_set_level(PIN_LCD_A0, arg_int);
         break;
     case U8X8_MSG_BYTE_END_TRANSFER:
         lcd_flush();
@@ -411,10 +540,10 @@ static uint8_t u8x8_gpio_and_delay_esp(u8x8_t *u8x8, uint8_t msg, uint8_t arg_in
         esp_rom_delay_us(1);
         break;
     case U8X8_MSG_GPIO_RESET:
-        gpio_set_level(PIN_LCD_RESET, arg_int);
+            gpio_set_level(PIN_LCD_RESET, arg_int);
         break;
     case U8X8_MSG_GPIO_DC:
-        gpio_set_level(PIN_LCD_A0, arg_int);
+            gpio_set_level(PIN_LCD_A0, arg_int);
         break;
     case U8X8_MSG_GPIO_CS:
         break;  /* driven by the SPI peripheral */
@@ -476,4 +605,14 @@ esp_err_t board_init(void)
 
     ESP_LOGI(TAG, "board ready");
     return ESP_OK;
+}
+
+void board_apply_settings(void)
+{
+    const settings_t *cfg = settings_get();
+
+    board_set_charge_en(cfg->batt_charge_en);
+    if (!cfg->led_enabled) {
+        board_set_led(false);
+    }
 }
