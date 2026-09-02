@@ -801,7 +801,7 @@ void lcd_draw_startup_screen(void)
     u8g2_SendBuffer(display);
 }
 
-void lcd_draw_battery_animation(uint8_t frame)
+void lcd_draw_battery_status(lcd_battery_state_t state, uint8_t frame)
 {
     u8g2_t *display = board_lcd();
 
@@ -813,15 +813,31 @@ void lcd_draw_battery_animation(uint8_t frame)
     const int battery_y = 17;
     const int battery_w = 56;
     const int battery_h = 28;
-    const int segment_count = (frame % 5) + 1;
+    int segment_count = 0;
+
+    if (state == LCD_BATTERY_CHARGED) {
+        segment_count = 5;
+    } else if (state == LCD_BATTERY_CHARGING) {
+        segment_count = (frame % 5) + 1;
+    }
 
     u8g2_ClearBuffer(display);
     u8g2_SetFont(display, u8g2_font_6x10_tf);
-    u8g2_DrawStr(display, 29, 10, "STANDBY");
+    if (state == LCD_BATTERY_FAULT) {
+        u8g2_DrawStr(display, 47, 10, "FAULT");
+    } else if (state == LCD_BATTERY_CHARGED) {
+        u8g2_DrawStr(display, 41, 10, "CHARGED");
+    } else {
+        u8g2_DrawStr(display, 38, 10, "CHARGING");
+    }
     u8g2_DrawFrame(display, battery_x, battery_y, battery_w, battery_h);
     u8g2_DrawBox(display, battery_x + battery_w, battery_y + 8, 4, battery_h - 16);
     for (int segment = 0; segment < segment_count; segment++) {
         u8g2_DrawBox(display, battery_x + 4 + segment * 10, battery_y + 4, 7, battery_h - 8);
+    }
+    if (state == LCD_BATTERY_FAULT) {
+        u8g2_SetFont(display, u8g2_font_logisoso24_tf);
+        u8g2_DrawStr(display, 56, 42, "?");
     }
     u8g2_SetFont(display, u8g2_font_5x7_tf);
     u8g2_DrawStr(display, 17, 61, "HOLD ENTER TO START");

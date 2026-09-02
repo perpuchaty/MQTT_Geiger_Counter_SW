@@ -7,7 +7,13 @@ extern "C" {
 #endif
 
 void lcd_draw_startup_screen(void);
-void lcd_draw_battery_animation(uint8_t frame);
+typedef enum {
+	LCD_BATTERY_FAULT,
+	LCD_BATTERY_CHARGED,
+	LCD_BATTERY_CHARGING,
+} lcd_battery_state_t;
+
+void lcd_draw_battery_status(lcd_battery_state_t state, uint8_t frame);
 esp_err_t lcd_backlight_init(void);
 void lcd_set_backlight(uint8_t brightness);
 bool lcd_handle_button(board_input_t input, bool pressed);

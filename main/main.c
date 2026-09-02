@@ -114,7 +114,9 @@ typedef struct {
 
 #define POWER_OFF_HOLD_US (3ULL * 1000 * 1000)
 #define POWER_ON_HOLD_US  (3LL * 1000 * 1000)
-#define POWER_ON_FRAME_MS 200
+#define STANDBY_BACKLIGHT_US (3LL * 1000 * 1000)
+#define POWER_ON_POLL_MS 20
+#define POWER_ON_FRAME_US (200LL * 1000)
 
 static QueueHandle_t s_button_events;
 static esp_timer_handle_t s_power_off_timer;
@@ -261,13 +263,22 @@ static void wait_for_power_on(void)
 
     ESP_LOGI(TAG, "Waiting for a 3 second Enter hold");
     int64_t pressed_since_us = 0;
+    int64_t backlight_off_at_us = esp_timer_get_time() + STANDBY_BACKLIGHT_US;
+    int64_t next_frame_at_us = 0;
     uint8_t animation_frame = 0;
+    bool backlight_on = true;
+    bool enter_was_pressed = false;
 
     for (;;) {
         int64_t now_us = esp_timer_get_time();
-        lcd_draw_battery_animation(animation_frame++);
+        bool enter_pressed = !board_input_level(BOARD_IN_BTN_ENTER);
 
-        if (!board_input_level(BOARD_IN_BTN_ENTER)) {
+        if (enter_pressed != enter_was_pressed) {
+            ESP_LOGI(TAG, "Startup Enter %s", enter_pressed ? "pressed" : "released");
+            enter_was_pressed = enter_pressed;
+        }
+
+        if (enter_pressed) {
             if (pressed_since_us == 0) {
                 pressed_since_us = now_us;
             } else if (now_us - pressed_since_us >= POWER_ON_HOLD_US) {
@@ -279,7 +290,28 @@ static void wait_for_power_on(void)
             pressed_since_us = 0;
         }
 
-        vTaskDelay(pdMS_TO_TICKS(POWER_ON_FRAME_MS));
+        if (backlight_on && now_us >= backlight_off_at_us) {
+            lcd_set_backlight(0);
+            backlight_on = false;
+        }
+
+        if (now_us >= next_frame_at_us) {
+            bool charging_high = board_input_level(BOARD_IN_CHRG);
+            bool standby_high = board_input_level(BOARD_IN_STBY);
+            lcd_battery_state_t battery_state;
+
+            if (charging_high && standby_high) {
+                battery_state = LCD_BATTERY_FAULT;
+            } else if (!standby_high) {
+                battery_state = LCD_BATTERY_CHARGED;
+            } else {
+                battery_state = LCD_BATTERY_CHARGING;
+            }
+            lcd_draw_battery_status(battery_state, animation_frame++);
+            next_frame_at_us = now_us + POWER_ON_FRAME_US;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(POWER_ON_POLL_MS));
     }
 }
 
