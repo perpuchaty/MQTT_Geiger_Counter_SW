@@ -1,7 +1,6 @@
 #include "config.h"
 #include "esp_check.h"
 #include "esp_log.h"
-#include "esp_random.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -20,11 +19,6 @@ static const char *TAG = "app";
 
 static TaskHandle_t     s_tube_tick_task;
 static esp_timer_handle_t s_tick_stop_timer;
-
-static void tube_tick_notify(void)
-{
-    xTaskNotifyGive(s_tube_tick_task);
-}
 
 static void tick_stop_timer_cb(void *arg)
 {
@@ -88,7 +82,9 @@ static void tube_pulse_isr(board_input_t input, bool level, void *arg)
 static void tube_tick_task(void *arg)
 {
     for (;;) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        uint32_t pulses = ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        ESP_LOGI(TAG, "Tube tick detected (%lu pulse%s)", (unsigned long)pulses,
+                 pulses == 1 ? "" : "s");
         tube_pulse_feedback();
     }
 }
@@ -347,11 +343,4 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(wifi_prov_start(provisioning));
     ESP_ERROR_CHECK(lcd_start_main_screen());
-
-    for (;;) {
-        uint32_t delay_ms = 250 + (esp_random() % 2751);
-        vTaskDelay(pdMS_TO_TICKS(delay_ms));
-        board_simulate_tube_pulse();
-        tube_tick_notify();
-    }
 }

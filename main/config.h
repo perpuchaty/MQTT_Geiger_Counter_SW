@@ -27,7 +27,7 @@ extern "C" {
 #define PIN_ADC_VLATCH GPIO_NUM_4 //input ADC
 #define PIN_PWM_TUBE GPIO_NUM_5 //output PWM
 #define PIN_ADC_TUBE GPIO_NUM_6 //input ADC
-#define PIN_TUBE_CNT GPIO_NUM_0 //input pulse counter 
+#define PIN_TUBE_CNT GPIO_NUM_7 //input pulse counter 
 #define PIN_VTUBE_OK GPIO_NUM_8 //input
 #define PIN_LED GPIO_NUM_9  //output
 #define PIN_PWM_LCD GPIO_NUM_14 //output PWM
@@ -151,8 +151,6 @@ bool board_input_level(board_input_t in);
 esp_err_t board_input_set_isr(board_input_t in, board_input_isr_t cb, void *arg);
 /** Free running tube pulse counter, incremented by the PIN_TUBE_CNT ISR. */
 uint32_t board_tube_pulses(void);
-/** Adds one simulated tube pulse for hardware-free testing. */
-void board_simulate_tube_pulse(void);
 
 /* PWM */
 esp_err_t board_hv_set_duty(float duty_pct);
