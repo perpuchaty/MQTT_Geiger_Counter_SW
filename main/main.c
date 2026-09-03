@@ -110,6 +110,7 @@ typedef struct {
 } button_event_t;
 
 #define POWER_OFF_HOLD_US (3ULL * 1000 * 1000)
+#define POWER_SAVE_HOLD_US (3ULL * 1000 * 1000)
 #define POWER_ON_HOLD_US  (3LL * 1000 * 1000)
 #define STANDBY_BACKLIGHT_US (3LL * 1000 * 1000)
 #define STANDBY_CLEAR_US (3LL * 1000 * 1000)
@@ -118,12 +119,21 @@ typedef struct {
 
 static QueueHandle_t s_button_events;
 static esp_timer_handle_t s_power_off_timer;
+static esp_timer_handle_t s_power_save_timer;
 
 static void power_off_timer_cb(void *arg)
 {
     if (!board_input_level(BOARD_IN_BTN_ENTER)) {
         ESP_LOGI(TAG, "Enter held for 3 seconds, requesting shutdown confirmation");
         lcd_request_shutdown_confirmation();
+    }
+}
+
+static void power_save_timer_cb(void *arg)
+{
+    if (!board_input_level(BOARD_IN_BTN_RIGHT)) {
+        ESP_LOGI(TAG, "Right held for 3 seconds, requesting power-save confirmation");
+        lcd_request_power_save_confirmation();
     }
 }
 
@@ -141,17 +151,55 @@ static void power_off(void)
     esp_restart();
 }
 
-static void power_off_hold_update(const button_event_t *event)
+static void button_hold_update(const button_event_t *event)
 {
-    if (event->input != BOARD_IN_BTN_ENTER) {
+    esp_timer_handle_t timer;
+
+    if (event->input == BOARD_IN_BTN_ENTER) {
+        timer = s_power_off_timer;
+    } else if (event->input == BOARD_IN_BTN_RIGHT) {
+        timer = s_power_save_timer;
+    } else {
         return;
     }
 
-    if (esp_timer_is_active(s_power_off_timer)) {
-        esp_timer_stop(s_power_off_timer);
+    if (esp_timer_is_active(timer)) {
+        esp_timer_stop(timer);
     }
     if (!event->level) {
-        esp_timer_start_once(s_power_off_timer, POWER_OFF_HOLD_US);
+        esp_timer_start_once(timer, event->input == BOARD_IN_BTN_ENTER
+                                        ? POWER_OFF_HOLD_US : POWER_SAVE_HOLD_US);
+    }
+}
+
+static esp_err_t apply_power_save_mode(bool enabled)
+{
+    ESP_RETURN_ON_ERROR(wifi_radio_set_enabled(!enabled), TAG, "set radio state");
+    if (!enabled && !wifi_has_credentials()) {
+        ESP_RETURN_ON_ERROR(wifi_prov_start(WIFI_PROV_BOTH), TAG, "start provisioning");
+    }
+    return ESP_OK;
+}
+
+static void set_power_save_mode(bool enabled)
+{
+    bool previous = settings_get()->power_save_mode;
+    if (enabled == previous) {
+        return;
+    }
+
+    esp_err_t err = apply_power_save_mode(enabled);
+    if (err == ESP_OK) {
+        settings_t updated = *settings_get();
+        updated.power_save_mode = enabled;
+        err = settings_save(&updated);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to %s power save: %s", enabled ? "enable" : "disable",
+                 esp_err_to_name(err));
+        apply_power_save_mode(previous);
+    } else {
+        ESP_LOGI(TAG, "Power save %s", enabled ? "enabled" : "disabled");
     }
 }
 
@@ -203,15 +251,20 @@ static void button_event_task(void *arg)
         xQueueReceive(s_button_events, &event, portMAX_DELAY);
         ESP_LOGI(TAG, "button %s %s", button_name(event.input),
                  event.level ? "released" : "pressed");
-        power_off_hold_update(&event);
+        button_hold_update(&event);
 
         bool lamp_test_was_active = lcd_lamp_test_active();
-        bool shutdown_confirmed = lcd_handle_button(event.input, !event.level);
+        lcd_action_t action = lcd_handle_button(event.input, !event.level);
         bool lamp_test_is_active = lcd_lamp_test_active();
 
-        if (shutdown_confirmed) {
+        if (action == LCD_ACTION_SHUTDOWN) {
             power_off();
+        } else if (action == LCD_ACTION_POWER_SAVE_ENABLE) {
+            set_power_save_mode(true);
+        } else if (action == LCD_ACTION_POWER_SAVE_DISABLE) {
+            set_power_save_mode(false);
         }
+        lcd_refresh();
 
         if (lamp_test_is_active) {
             if (esp_timer_is_active(s_tick_stop_timer)) {
@@ -232,9 +285,15 @@ static esp_err_t button_events_init(void)
         .callback = power_off_timer_cb,
         .name = "power_off_hold",
     };
+    const esp_timer_create_args_t power_save_timer_args = {
+        .callback = power_save_timer_cb,
+        .name = "power_save_hold",
+    };
 
     ESP_RETURN_ON_ERROR(esp_timer_create(&power_off_timer_args, &s_power_off_timer),
                         TAG, "power off timer");
+    ESP_RETURN_ON_ERROR(esp_timer_create(&power_save_timer_args, &s_power_save_timer),
+                        TAG, "power save timer");
     s_button_events = xQueueCreate(16, sizeof(button_event_t));
     ESP_RETURN_ON_FALSE(s_button_events, ESP_ERR_NO_MEM, TAG, "button event queue");
     ESP_RETURN_ON_FALSE(xTaskCreate(button_event_task, "buttons", 2048, NULL, 5, NULL) == pdPASS,
@@ -375,15 +434,12 @@ void app_main(void)
     ESP_ERROR_CHECK(button_events_init());
     ESP_ERROR_CHECK(geiger_start());
     ESP_ERROR_CHECK(wifi_prov_init());
+    ESP_ERROR_CHECK(apply_power_save_mode(settings_get()->power_save_mode));
     ESP_ERROR_CHECK(mqtt_init());
 
-    wifi_prov_method_t provisioning = WIFI_PROV_BLUFI;
-    if (!wifi_has_credentials()) {
-        provisioning |= WIFI_PROV_SOFTAP;
+    if (!settings_get()->power_save_mode && !wifi_has_credentials()) {
         ESP_LOGI(TAG, "provisioning: BluFi over BLE, or join \"%s\"", wifi_softap_ssid());
-    } else {
-        ESP_LOGI(TAG, "BluFi ready for Wi-Fi reconfiguration");
+        ESP_ERROR_CHECK(wifi_prov_start(WIFI_PROV_BOTH));
     }
-    ESP_ERROR_CHECK(wifi_prov_start(provisioning));
     ESP_ERROR_CHECK(lcd_start_main_screen());
 }

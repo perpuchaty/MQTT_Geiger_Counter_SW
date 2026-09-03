@@ -20,8 +20,9 @@ static volatile int64_t s_last_activity_us;
 static volatile bool s_display_busy;
 static TaskHandle_t s_display_task;
 
-#define LCD_AUTO_DIM_DELAY_US (30LL * 1000000LL)
-#define LCD_MENU_ITEM_COUNT   8
+#define LCD_AUTO_DIM_DELAY_US  (30LL * 1000000LL)
+#define LCD_MENU_ITEM_COUNT    8
+#define LCD_SYSTEM_FIELD_COUNT 5
 
 typedef enum {
     LCD_SCREEN_MAIN,
@@ -33,12 +34,14 @@ typedef enum {
     LCD_SCREEN_TIME,
     LCD_SCREEN_HV,
     LCD_SCREEN_LAMP_TEST,
+    LCD_SCREEN_POWER_SAVE,
     LCD_SCREEN_SHUTDOWN,
     LCD_SCREEN_OFF,
 } lcd_screen_t;
 
 static volatile lcd_screen_t s_screen = LCD_SCREEN_MAIN;
 static lcd_screen_t s_screen_before_shutdown = LCD_SCREEN_MAIN;
+static lcd_screen_t s_screen_before_power_save = LCD_SCREEN_MAIN;
 static uint8_t s_menu_item;
 static bool s_wifi_forget_confirm;
 static bool s_wifi_forget_failed;
@@ -134,8 +137,10 @@ static void draw_main_screen(void)
     }
 
     u8g2_ClearBuffer(display);
-    draw_bluetooth_icon(display, 3, 1, wifi_is_bluetooth_connected());
-    draw_wifi_icon(display, 17, 1, wifi_is_connected());
+    if (!settings_get()->power_save_mode) {
+        draw_bluetooth_icon(display, 3, 1, wifi_is_bluetooth_connected());
+        draw_wifi_icon(display, 17, 1, wifi_is_connected());
+    }
     if (board_hv_is_enabled()) {
         u8g2_DrawFrame(display, 39, 1, 17, 11);
         u8g2_SetFont(display, u8g2_font_5x7_tf);
@@ -213,6 +218,7 @@ static void draw_system_screen(void)
     u8g2_t *display = board_lcd();
     char text[24];
     const int row_y[] = { 24, 35, 46, 57 };
+    const uint8_t first_field = s_system_field < 4 ? 0 : 1;
 
     if (display == NULL) {
         return;
@@ -223,15 +229,24 @@ static void draw_system_screen(void)
     u8g2_DrawStr(display, 4, 10, "SYSTEM SETTINGS");
     u8g2_DrawHLine(display, 0, 13, LCD_WIDTH);
     u8g2_SetFont(display, u8g2_font_5x7_tf);
-    snprintf(text, sizeof(text), "SOUND:      %s", sound_name(s_system_settings.spk_sound));
-    u8g2_DrawStr(display, 7, row_y[0], text);
-    snprintf(text, sizeof(text), "VOLUME:     %u", s_system_settings.spk_volume);
-    u8g2_DrawStr(display, 7, row_y[1], text);
-    snprintf(text, sizeof(text), "BRIGHTNESS: %u %%", s_system_settings.lcd_brightness);
-    u8g2_DrawStr(display, 7, row_y[2], text);
-    snprintf(text, sizeof(text), "AUTO DIM:   %s", s_system_settings.lcd_auto_dim ? "ON" : "OFF");
-    u8g2_DrawStr(display, 7, row_y[3], text);
-    u8g2_DrawFrame(display, 2, 15 + s_system_field * 11, LCD_WIDTH - 4, 11);
+    for (uint8_t row = 0; row < 4; row++) {
+        uint8_t field = first_field + row;
+        if (field == 0) {
+            snprintf(text, sizeof(text), "SOUND:      %s", sound_name(s_system_settings.spk_sound));
+        } else if (field == 1) {
+            snprintf(text, sizeof(text), "VOLUME:     %u", s_system_settings.spk_volume);
+        } else if (field == 2) {
+            snprintf(text, sizeof(text), "BRIGHTNESS: %u %%", s_system_settings.lcd_brightness);
+        } else if (field == 3) {
+            snprintf(text, sizeof(text), "AUTO DIM:   %s", s_system_settings.lcd_auto_dim ? "ON" : "OFF");
+        } else {
+            snprintf(text, sizeof(text), "POWER SAVE: %s",
+                     s_system_settings.power_save_mode ? "ON" : "OFF");
+        }
+        u8g2_DrawStr(display, 7, row_y[row], text);
+    }
+    u8g2_DrawFrame(display, 2, 15 + (s_system_field - first_field) * 11,
+                   LCD_WIDTH - 4, 11);
     if (s_system_editing) {
         u8g2_DrawBox(display, 120, 4, 4, 4);
     }
@@ -438,6 +453,25 @@ static void draw_shutdown_screen(void)
     u8g2_SendBuffer(display);
 }
 
+static void draw_power_save_screen(void)
+{
+    u8g2_t *display = board_lcd();
+    if (display == NULL) {
+        return;
+    }
+
+    u8g2_ClearBuffer(display);
+    u8g2_SetFont(display, u8g2_font_6x10_tf);
+    u8g2_DrawStr(display, 4, 10, "POWER SAVE?");
+    u8g2_DrawHLine(display, 0, 13, LCD_WIDTH);
+    u8g2_DrawStr(display, 24, 32,
+                 settings_get()->power_save_mode ? "DISABLE" : "ENABLE");
+    u8g2_SetFont(display, u8g2_font_5x7_tf);
+    u8g2_DrawStr(display, 4, 48, "ENTER  YES");
+    u8g2_DrawStr(display, 4, 61, "LEFT   CANCEL");
+    u8g2_SendBuffer(display);
+}
+
 static void time_adjust(int direction)
 {
     if (s_time_field == 0) {
@@ -492,32 +526,49 @@ static void system_adjust(int direction)
         int brightness = s_system_settings.lcd_brightness + direction * 5;
         s_system_settings.lcd_brightness = brightness < 0 ? 0 : brightness > 100 ? 100 : brightness;
         lcd_set_backlight(s_system_settings.lcd_brightness);
-    } else {
+    } else if (s_system_field == 3) {
         s_system_settings.lcd_auto_dim = !s_system_settings.lcd_auto_dim;
+    } else {
+        s_system_settings.power_save_mode = !s_system_settings.power_save_mode;
     }
 }
 
-bool lcd_handle_button(board_input_t input, bool pressed)
+lcd_action_t lcd_handle_button(board_input_t input, bool pressed)
 {
     if (s_screen == LCD_SCREEN_SHUTDOWN) {
         if (!pressed) {
-            return false;
+            return LCD_ACTION_NONE;
         }
         s_last_activity_us = esp_timer_get_time();
         if (input == BOARD_IN_BTN_ENTER) {
-            return true;
+            return LCD_ACTION_SHUTDOWN;
         }
         if (input == BOARD_IN_BTN_LEFT) {
             s_screen = s_screen_before_shutdown;
         }
-        return false;
+        return LCD_ACTION_NONE;
+    }
+    if (s_screen == LCD_SCREEN_POWER_SAVE) {
+        if (!pressed) {
+            return LCD_ACTION_NONE;
+        }
+        s_last_activity_us = esp_timer_get_time();
+        if (input == BOARD_IN_BTN_ENTER) {
+            bool enable = !settings_get()->power_save_mode;
+            s_screen = s_screen_before_power_save;
+            return enable ? LCD_ACTION_POWER_SAVE_ENABLE : LCD_ACTION_POWER_SAVE_DISABLE;
+        }
+        if (input == BOARD_IN_BTN_LEFT) {
+            s_screen = s_screen_before_power_save;
+        }
+        return LCD_ACTION_NONE;
     }
     if (s_screen == LCD_SCREEN_LAMP_TEST && input == BOARD_IN_BTN_ENTER) {
         s_lamp_test_active = pressed;
-        return false;
+        return LCD_ACTION_NONE;
     }
     if (!pressed) {
-        return false;
+        return LCD_ACTION_NONE;
     }
     s_last_activity_us = esp_timer_get_time();
 
@@ -596,6 +647,12 @@ bool lcd_handle_button(board_input_t input, bool pressed)
     case LCD_SCREEN_SYSTEM:
         if (input == BOARD_IN_BTN_ENTER) {
             if (s_system_editing) {
+                if (s_system_field == 4 &&
+                    s_system_settings.power_save_mode != settings_get()->power_save_mode) {
+                    s_system_editing = false;
+                    return s_system_settings.power_save_mode ? LCD_ACTION_POWER_SAVE_ENABLE
+                                                             : LCD_ACTION_POWER_SAVE_DISABLE;
+                }
                 if (settings_save(&s_system_settings) == ESP_OK) {
                     lcd_set_backlight(settings_get()->lcd_brightness);
                 }
@@ -614,7 +671,7 @@ bool lcd_handle_button(board_input_t input, bool pressed)
         } else if (input == BOARD_IN_BTN_RIGHT) {
             if (s_system_editing) {
                 system_adjust(1);
-            } else if (s_system_field < 3) {
+            } else if (s_system_field < LCD_SYSTEM_FIELD_COUNT - 1) {
                 s_system_field++;
             }
         }
@@ -696,11 +753,12 @@ bool lcd_handle_button(board_input_t input, bool pressed)
             s_screen = LCD_SCREEN_MENU;
         }
         break;
+    case LCD_SCREEN_POWER_SAVE:
     case LCD_SCREEN_SHUTDOWN:
     case LCD_SCREEN_OFF:
         break;
     }
-    return false;
+    return LCD_ACTION_NONE;
 }
 
 void lcd_request_shutdown_confirmation(void)
@@ -710,6 +768,19 @@ void lcd_request_shutdown_confirmation(void)
         s_lamp_test_active = false;
         s_last_activity_us = esp_timer_get_time();
         s_screen = LCD_SCREEN_SHUTDOWN;
+        lcd_refresh();
+    }
+}
+
+void lcd_request_power_save_confirmation(void)
+{
+    if (s_screen != LCD_SCREEN_SHUTDOWN && s_screen != LCD_SCREEN_POWER_SAVE &&
+        s_screen != LCD_SCREEN_OFF) {
+        s_screen_before_power_save = s_screen;
+        s_lamp_test_active = false;
+        s_last_activity_us = esp_timer_get_time();
+        s_screen = LCD_SCREEN_POWER_SAVE;
+        lcd_refresh();
     }
 }
 
@@ -783,6 +854,9 @@ static void main_screen_task(void *arg)
             break;
         case LCD_SCREEN_LAMP_TEST:
             draw_lamp_test_screen();
+            break;
+        case LCD_SCREEN_POWER_SAVE:
+            draw_power_save_screen();
             break;
         case LCD_SCREEN_SHUTDOWN:
             draw_shutdown_screen();
