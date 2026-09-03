@@ -93,6 +93,8 @@ extern "C" {
 #define BOARD_ADC_ATTEN         ADC_ATTEN_DB_12    /* full ~0..3.1 V input range */
 #define BOARD_ADC_BURST_SAMPLES 32
 #define BOARD_ADC_INTERVAL_MS   500
+#define VLATCH_DIVIDER_NUMERATOR   2
+#define VLATCH_DIVIDER_DENOMINATOR 1
 #define TUBE_DIVIDER_TOP_OHM    80000000UL
 #define TUBE_DIVIDER_BOTTOM_OHM 510000UL
 
@@ -164,7 +166,7 @@ esp_err_t board_backlight_set(uint8_t duty_pct);
 esp_err_t board_buzzer_on(uint32_t freq_hz, uint8_t duty_level);
 esp_err_t board_buzzer_off(void);
 
-/* ADC, values are refreshed continuously in the background */
+/* ADC, values are refreshed periodically in the background */
 esp_err_t board_adc_get_raw(board_adc_ch_t ch, int *raw);
 esp_err_t board_adc_get_mv(board_adc_ch_t ch, int *mv);
 esp_err_t board_tube_voltage_get_mv(int *mv);

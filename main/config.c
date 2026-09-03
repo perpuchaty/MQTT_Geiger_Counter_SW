@@ -435,9 +435,20 @@ esp_err_t board_adc_get_raw(board_adc_ch_t ch, int *raw)
 esp_err_t board_adc_get_mv(board_adc_ch_t ch, int *mv)
 {
     int raw;
+    int pin_mv;
     ESP_RETURN_ON_ERROR(board_adc_get_raw(ch, &raw), TAG, "raw");
     ESP_RETURN_ON_FALSE(s_adc_cali[ch], ESP_ERR_NOT_SUPPORTED, TAG, "not calibrated");
-    return adc_cali_raw_to_voltage(s_adc_cali[ch], raw, mv);
+    ESP_RETURN_ON_ERROR(adc_cali_raw_to_voltage(s_adc_cali[ch], raw, &pin_mv),
+                        TAG, "calibrate voltage");
+
+    if (ch == BOARD_ADC_VLATCH) {
+        *mv = (int)(((int64_t)pin_mv * VLATCH_DIVIDER_NUMERATOR +
+                     VLATCH_DIVIDER_DENOMINATOR / 2) /
+                    VLATCH_DIVIDER_DENOMINATOR);
+    } else {
+        *mv = pin_mv;
+    }
+    return ESP_OK;
 }
 
 esp_err_t board_tube_voltage_get_mv(int *mv)

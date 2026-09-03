@@ -125,6 +125,59 @@ static void draw_wifi_icon(u8g2_t *display, int x, int y, bool connected)
     }
 }
 
+static uint8_t battery_percentage(int voltage_mv)
+{
+    static const struct {
+        int voltage_mv;
+        uint8_t percentage;
+    } points[] = {
+        { 3300, 0 },
+        { 3600, 20 },
+        { 3700, 40 },
+        { 3800, 60 },
+        { 3950, 80 },
+        { 4200, 100 },
+    };
+
+    if (voltage_mv <= points[0].voltage_mv) {
+        return 0;
+    }
+    for (size_t i = 1; i < sizeof(points) / sizeof(points[0]); i++) {
+        if (voltage_mv <= points[i].voltage_mv) {
+            int voltage_span = points[i].voltage_mv - points[i - 1].voltage_mv;
+            int percentage_span = points[i].percentage - points[i - 1].percentage;
+            return points[i - 1].percentage +
+                   (voltage_mv - points[i - 1].voltage_mv) * percentage_span / voltage_span;
+        }
+    }
+    return 100;
+}
+
+static void draw_battery_icon(u8g2_t *display, int x, int y)
+{
+    const int width = 19;
+    const int height = 10;
+    bool charger_fault = board_input_level(BOARD_IN_CHRG) &&
+                         board_input_level(BOARD_IN_STBY);
+
+    u8g2_DrawFrame(display, x, y, width - 2, height);
+    u8g2_DrawBox(display, x + width - 2, y + 3, 2, height - 6);
+    if (charger_fault) {
+        u8g2_DrawLine(display, x + 2, y + 2, x + width - 5, y + height - 3);
+        u8g2_DrawLine(display, x + 2, y + height - 3, x + width - 5, y + 2);
+        return;
+    }
+
+    int voltage_mv;
+    if (board_adc_get_mv(BOARD_ADC_VLATCH, &voltage_mv) != ESP_OK) {
+        return;
+    }
+    uint8_t bars = (battery_percentage(voltage_mv) + 24) / 25;
+    for (uint8_t bar = 0; bar < bars; bar++) {
+        u8g2_DrawBox(display, x + 2 + bar * 4, y + 2, 3, height - 4);
+    }
+}
+
 static void draw_main_screen(void)
 {
     u8g2_t *display = board_lcd();
@@ -146,6 +199,7 @@ static void draw_main_screen(void)
         u8g2_SetFont(display, u8g2_font_5x7_tf);
         u8g2_DrawStr(display, 42, 9, "HV");
     }
+    draw_battery_icon(display, 59, 1);
 
     now = time(NULL);
     if (now > 1609459200 && localtime_r(&now, &local_time) != NULL) {
