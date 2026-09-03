@@ -191,15 +191,15 @@ static void draw_main_screen(void)
 
     u8g2_ClearBuffer(display);
     if (!settings_get()->power_save_mode) {
-        draw_bluetooth_icon(display, 3, 1, wifi_is_bluetooth_connected());
-        draw_wifi_icon(display, 17, 1, wifi_is_connected());
+        draw_bluetooth_icon(display, 1, 1, wifi_is_bluetooth_connected());
+        draw_wifi_icon(display, 13, 1, wifi_is_connected());
     }
     if (board_hv_is_enabled()) {
-        u8g2_DrawFrame(display, 39, 1, 17, 11);
+        u8g2_DrawFrame(display, 31, 1, 17, 11);
         u8g2_SetFont(display, u8g2_font_5x7_tf);
-        u8g2_DrawStr(display, 42, 9, "HV");
+        u8g2_DrawStr(display, 34, 9, "HV");
     }
-    draw_battery_icon(display, 59, 1);
+    draw_battery_icon(display, LCD_WIDTH - 22, 1);
 
     now = time(NULL);
     if (now > 1609459200 && localtime_r(&now, &local_time) != NULL) {
@@ -208,7 +208,7 @@ static void draw_main_screen(void)
         snprintf(text, sizeof(text), "--:--");
     }
     u8g2_SetFont(display, u8g2_font_6x10_tf);
-    u8g2_DrawStr(display, LCD_WIDTH - u8g2_GetStrWidth(display, text) - 3, 10, text);
+    u8g2_DrawStr(display, (LCD_WIDTH - u8g2_GetStrWidth(display, text)) / 2, 10, text);
     u8g2_DrawHLine(display, 0, 13, LCD_WIDTH);
 
     uint32_t dose_x100 = (uint32_t)(geiger_usvh() * 100.0f + 0.5f);
