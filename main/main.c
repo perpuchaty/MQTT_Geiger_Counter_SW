@@ -281,10 +281,12 @@ static void wait_for_power_on(void)
             ESP_LOGI(TAG, "Startup Enter %s", enter_pressed ? "pressed" : "released");
             enter_was_pressed = enter_pressed;
             if (enter_pressed) {
-                lcd_set_backlight(settings_get()->lcd_brightness);
+                lcd_wake_backlight();
                 backlight_on = true;
                 screen_visible = true;
                 next_frame_at_us = 0;
+                backlight_off_at_us = now_us + STANDBY_BACKLIGHT_US;
+                clear_at_us = backlight_off_at_us + STANDBY_CLEAR_US;
             } else {
                 backlight_off_at_us = now_us + STANDBY_BACKLIGHT_US;
                 clear_at_us = backlight_off_at_us + STANDBY_CLEAR_US;
@@ -304,7 +306,7 @@ static void wait_for_power_on(void)
             pressed_since_us = 0;
         }
 
-        if (backlight_on && now_us >= backlight_off_at_us) {
+        if (backlight_on && !enter_pressed && now_us >= backlight_off_at_us) {
             lcd_set_backlight(0);
             backlight_on = false;
         }

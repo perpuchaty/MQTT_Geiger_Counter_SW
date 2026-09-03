@@ -93,6 +93,12 @@ void lcd_set_backlight(uint8_t brightness)
     s_backlight_target = brightness > 100 ? 100 : brightness;
 }
 
+void lcd_wake_backlight(void)
+{
+    s_last_activity_us = esp_timer_get_time();
+    lcd_set_backlight(settings_get()->lcd_brightness);
+}
+
 static void draw_bluetooth_icon(u8g2_t *display, int x, int y, bool connected)
 {
     u8g2_DrawLine(display, x + 3, y, x + 3, y + 10);
