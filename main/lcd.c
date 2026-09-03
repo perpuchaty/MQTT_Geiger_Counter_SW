@@ -18,6 +18,7 @@ static volatile uint8_t s_backlight_target;
 static volatile uint8_t s_backlight_current;
 static volatile int64_t s_last_activity_us;
 static volatile bool s_display_busy;
+static TaskHandle_t s_display_task;
 
 #define LCD_AUTO_DIM_DELAY_US (30LL * 1000000LL)
 #define LCD_MENU_ITEM_COUNT   8
@@ -737,6 +738,20 @@ bool lcd_lamp_test_active(void)
     return s_lamp_test_active;
 }
 
+void lcd_refresh(void)
+{
+    if (s_display_task != NULL) {
+        xTaskNotifyGive(s_display_task);
+    }
+}
+
+void lcd_refresh_measurements(void)
+{
+    if (s_screen == LCD_SCREEN_MAIN) {
+        lcd_refresh();
+    }
+}
+
 static void main_screen_task(void *arg)
 {
     for (;;) {
@@ -776,13 +791,14 @@ static void main_screen_task(void *arg)
             break;
         }
         s_display_busy = false;
-        vTaskDelay(pdMS_TO_TICKS(250));
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     }
 }
 
 esp_err_t lcd_start_main_screen(void)
 {
-    ESP_RETURN_ON_FALSE(xTaskCreate(main_screen_task, "display", 3072, NULL, 4, NULL) == pdPASS,
+    ESP_RETURN_ON_FALSE(xTaskCreate(main_screen_task, "display", 3072, NULL, 4,
+                                    &s_display_task) == pdPASS,
                         ESP_ERR_NO_MEM, TAG, "display task");
     return ESP_OK;
 }
