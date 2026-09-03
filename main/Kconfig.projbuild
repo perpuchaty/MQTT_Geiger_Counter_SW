@@ -135,6 +135,13 @@ menu "Geiger Counter"
 
         comment "Defaults only, every value can be changed from the web UI"
 
+        config GEIGER_SIMULATE_TUBE_PULSES
+            bool "Simulate tube pulses for testing"
+            default n
+            help
+                Generate randomized Geiger pulses when no tube is connected.
+                Disable this option for normal measurements.
+
         config GEIGER_TUBE_WINDOW_S
             int "Sliding window used to derive CPM (s)"
             range 5 300

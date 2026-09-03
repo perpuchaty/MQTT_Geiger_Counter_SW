@@ -2,6 +2,7 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_pm.h"
+#include "esp_random.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -103,6 +104,26 @@ static esp_err_t tube_tick_init(void)
                         ESP_ERR_NO_MEM, TAG, "tick task");
     return board_input_set_isr(BOARD_IN_TUBE_CNT, tube_pulse_isr, NULL);
 }
+
+#if CONFIG_GEIGER_SIMULATE_TUBE_PULSES
+static void tube_simulation_task(void *arg)
+{
+    ESP_LOGW(TAG, "Tube pulse simulation enabled");
+    for (;;) {
+        uint32_t delay_ms = 250 + esp_random() % 2751;
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        board_simulate_tube_pulse();
+        xTaskNotifyGive(s_tube_tick_task);
+    }
+}
+
+static esp_err_t tube_simulation_start(void)
+{
+    return xTaskCreate(tube_simulation_task, "tube_sim", 2048, NULL, 3, NULL) == pdPASS
+               ? ESP_OK
+               : ESP_ERR_NO_MEM;
+}
+#endif
 
 typedef struct {
     board_input_t input;
@@ -431,6 +452,9 @@ void app_main(void)
     ESP_ERROR_CHECK(board_hv_set_enabled(settings_get()->hv_start_enabled));
     ESP_ERROR_CHECK(board_hv_regulator_start());
     ESP_ERROR_CHECK(tube_tick_init());
+#if CONFIG_GEIGER_SIMULATE_TUBE_PULSES
+    ESP_ERROR_CHECK(tube_simulation_start());
+#endif
     ESP_ERROR_CHECK(button_events_init());
     ESP_ERROR_CHECK(geiger_start());
     ESP_ERROR_CHECK(wifi_prov_init());

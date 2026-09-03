@@ -151,6 +151,8 @@ bool board_input_level(board_input_t in);
 esp_err_t board_input_set_isr(board_input_t in, board_input_isr_t cb, void *arg);
 /** Free running tube pulse counter, incremented by the PIN_TUBE_CNT ISR. */
 uint32_t board_tube_pulses(void);
+/** Injects one pulse into the counter for bench simulation. */
+void board_simulate_tube_pulse(void);
 
 /* PWM */
 esp_err_t board_hv_set_duty(float duty_pct);
