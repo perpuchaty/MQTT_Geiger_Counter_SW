@@ -26,6 +26,7 @@ static TaskHandle_t s_display_task;
 
 typedef enum {
     LCD_SCREEN_MAIN,
+    LCD_SCREEN_CHART,
     LCD_SCREEN_MENU,
     LCD_SCREEN_WIFI,
     LCD_SCREEN_MQTT,
@@ -222,6 +223,54 @@ static void draw_main_screen(void)
     u8g2_DrawHLine(display, 0, 52, LCD_WIDTH);
     snprintf(text, sizeof(text), "RATE  %lu CPM", (unsigned long)geiger_cpm());
     u8g2_SetFont(display, u8g2_font_5x7_tf);
+    u8g2_DrawStr(display, (LCD_WIDTH - u8g2_GetStrWidth(display, text)) / 2, 62, text);
+    u8g2_SendBuffer(display);
+}
+
+static void draw_chart_screen(void)
+{
+    u8g2_t *display = board_lcd();
+    uint16_t history[GEIGER_HISTORY_LEN];
+    char text[24];
+
+    if (display == NULL) {
+        return;
+    }
+
+    size_t count = geiger_history(history, GEIGER_HISTORY_LEN);
+    uint16_t maximum = 1;
+    for (size_t i = 0; i < count; i++) {
+        if (history[i] > maximum) {
+            maximum = history[i];
+        }
+    }
+
+    u8g2_ClearBuffer(display);
+    u8g2_SetFont(display, u8g2_font_5x7_tf);
+    u8g2_DrawStr(display, 2, 7, "CPM TREND");
+    snprintf(text, sizeof(text), "MAX %u", maximum);
+    u8g2_DrawStr(display, LCD_WIDTH - u8g2_GetStrWidth(display, text) - 2, 7, text);
+    u8g2_DrawHLine(display, 0, 10, LCD_WIDTH);
+
+    const int chart_top = 12;
+    const int chart_bottom = 49;
+    const int chart_height = chart_bottom - chart_top;
+    if (count < 2) {
+        u8g2_DrawStr(display, 34, 33, "COLLECTING...");
+    } else {
+        for (size_t i = 1; i < count; i++) {
+            int x0 = (int)((i - 1) * (LCD_WIDTH - 1) / (count - 1));
+            int x1 = (int)(i * (LCD_WIDTH - 1) / (count - 1));
+            int y0 = chart_bottom - (int)((uint32_t)history[i - 1] * chart_height / maximum);
+            int y1 = chart_bottom - (int)((uint32_t)history[i] * chart_height / maximum);
+            u8g2_DrawLine(display, x0, y0, x1, y1);
+        }
+    }
+
+    u8g2_DrawHLine(display, 0, 51, LCD_WIDTH);
+    uint32_t dose_x100 = (uint32_t)(geiger_usvh() * 100.0f + 0.5f);
+    snprintf(text, sizeof(text), "NOW %lu.%02lu uSv/h",
+             (unsigned long)(dose_x100 / 100), (unsigned long)(dose_x100 % 100));
     u8g2_DrawStr(display, (LCD_WIDTH - u8g2_GetStrWidth(display, text)) / 2, 62, text);
     u8g2_SendBuffer(display);
 }
@@ -640,8 +689,15 @@ lcd_action_t lcd_handle_button(board_input_t input, bool pressed)
     case LCD_SCREEN_MAIN:
         if (input == BOARD_IN_BTN_ENTER) {
             s_screen = LCD_SCREEN_MENU;
-        } else if (input == BOARD_IN_BTN_RIGHT) {
-            board_hv_set_duty(board_hv_duty_pct() + 1.0f);
+        } else if (input == BOARD_IN_BTN_LEFT || input == BOARD_IN_BTN_RIGHT) {
+            s_screen = LCD_SCREEN_CHART;
+        }
+        break;
+    case LCD_SCREEN_CHART:
+        if (input == BOARD_IN_BTN_ENTER) {
+            s_screen = LCD_SCREEN_MENU;
+        } else if (input == BOARD_IN_BTN_LEFT || input == BOARD_IN_BTN_RIGHT) {
+            s_screen = LCD_SCREEN_MAIN;
         }
         break;
     case LCD_SCREEN_MENU:
@@ -882,7 +938,7 @@ void lcd_refresh(void)
 
 void lcd_refresh_measurements(void)
 {
-    if (s_screen == LCD_SCREEN_MAIN) {
+    if (s_screen == LCD_SCREEN_MAIN || s_screen == LCD_SCREEN_CHART) {
         lcd_refresh();
     }
 }
@@ -894,6 +950,9 @@ static void main_screen_task(void *arg)
         switch (s_screen) {
         case LCD_SCREEN_MAIN:
             draw_main_screen();
+            break;
+        case LCD_SCREEN_CHART:
+            draw_chart_screen();
             break;
         case LCD_SCREEN_MENU:
             draw_menu_screen();
