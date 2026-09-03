@@ -44,7 +44,7 @@ static lcd_screen_t s_screen_before_shutdown = LCD_SCREEN_MAIN;
 static lcd_screen_t s_screen_before_power_save = LCD_SCREEN_MAIN;
 static uint8_t s_menu_item;
 static bool s_wifi_forget_confirm;
-static bool s_wifi_forget_failed;
+static esp_err_t s_wifi_forget_error;
 static uint8_t s_system_field;
 static bool s_system_editing;
 static settings_t s_system_settings;
@@ -300,7 +300,15 @@ static void draw_system_screen(void)
         u8g2_DrawStr(display, 7, row_y[row], text);
     }
     u8g2_DrawFrame(display, 2, 15 + (s_system_field - first_field) * 11,
-                   LCD_WIDTH - 4, 11);
+                   LCD_WIDTH - 12, 11);
+    const int scrollbar_y = 16;
+    const int scrollbar_h = 43;
+    const int thumb_h = scrollbar_h * 4 / LCD_SYSTEM_FIELD_COUNT;
+    const int thumb_y = scrollbar_y +
+                        (scrollbar_h - thumb_h) * s_system_field /
+                            (LCD_SYSTEM_FIELD_COUNT - 1);
+    u8g2_DrawFrame(display, LCD_WIDTH - 8, scrollbar_y, 5, scrollbar_h);
+    u8g2_DrawBox(display, LCD_WIDTH - 7, thumb_y + 1, 3, thumb_h - 2);
     if (s_system_editing) {
         u8g2_DrawBox(display, 120, 4, 4, 4);
     }
@@ -362,8 +370,10 @@ static void draw_wifi_screen(void)
     wifi_get_ip_str(ip, sizeof(ip));
     snprintf(text, sizeof(text), "IP: %s", ip);
     u8g2_DrawStr(display, 4, 38, text);
-    if (s_wifi_forget_failed) {
-        u8g2_DrawStr(display, 4, 50, "FORGET FAILED");
+    if (s_wifi_forget_error != ESP_OK) {
+        char error[28];
+        snprintf(error, sizeof(error), "ERROR: %.20s", esp_err_to_name(s_wifi_forget_error));
+        u8g2_DrawStr(display, 4, 50, error);
     } else if (wifi_has_credentials()) {
         u8g2_DrawStr(display, 4, 50, "ENTER FORGET NETWORK");
     } else if (wifi_prov_running() & WIFI_PROV_SOFTAP) {
@@ -640,7 +650,7 @@ lcd_action_t lcd_handle_button(board_input_t input, bool pressed)
                 s_screen = LCD_SCREEN_MAIN;
             } else if (s_menu_item == 1) {
                 s_wifi_forget_confirm = false;
-                s_wifi_forget_failed = false;
+                s_wifi_forget_error = ESP_OK;
                 s_screen = LCD_SCREEN_WIFI;
             } else if (s_menu_item == 2) {
                 s_screen = LCD_SCREEN_MQTT;
@@ -679,11 +689,11 @@ lcd_action_t lcd_handle_button(board_input_t input, bool pressed)
                 s_wifi_forget_confirm = true;
             } else {
                 esp_err_t err = wifi_forget();
-                if (err == ESP_OK) {
+                if (err == ESP_OK && wifi_radio_is_enabled()) {
                     err = wifi_prov_start(WIFI_PROV_SOFTAP);
                 }
                 s_wifi_forget_confirm = false;
-                s_wifi_forget_failed = err != ESP_OK;
+                s_wifi_forget_error = err;
             }
         } else if (input == BOARD_IN_BTN_LEFT) {
             if (s_wifi_forget_confirm) {

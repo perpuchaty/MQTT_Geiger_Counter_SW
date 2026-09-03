@@ -1302,7 +1302,9 @@ bool wifi_has_credentials(void)
 esp_err_t wifi_forget(void)
 {
     wifi_config_t empty = {0};
-    esp_wifi_disconnect();
+    if (s_radio_enabled) {
+        esp_wifi_disconnect();
+    }
     esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &empty);
     if (err == ESP_OK) {
         s_sta_connecting = false;
