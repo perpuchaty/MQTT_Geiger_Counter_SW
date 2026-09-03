@@ -31,10 +31,12 @@ extern "C" {
 
 /** Provisioning transports, may be combined. */
 typedef enum {
-    WIFI_PROV_NONE   = 0,
-    WIFI_PROV_BLUFI  = (1u << 0),   /* BLE, EspBlufi app */
-    WIFI_PROV_SOFTAP = (1u << 1),   /* SoftAP + captive portal */
-    WIFI_PROV_BOTH   = WIFI_PROV_BLUFI | WIFI_PROV_SOFTAP,
+    WIFI_PROV_NONE        = 0,
+    WIFI_PROV_BLUFI       = (1u << 0),   /* BLE, EspBlufi app */
+    WIFI_PROV_SOFTAP      = (1u << 1),   /* SoftAP + captive portal */
+    WIFI_PROV_SMARTCONFIG = (1u << 2),   /* ESPTouch phone app */
+    WIFI_PROV_BOTH        = WIFI_PROV_BLUFI | WIFI_PROV_SOFTAP,
+    WIFI_PROV_ALL         = WIFI_PROV_BOTH | WIFI_PROV_SMARTCONFIG,
 } wifi_prov_method_t;
 
 /** NVS, netif, event loop and the Wi-Fi driver. Connects with stored credentials if any. */

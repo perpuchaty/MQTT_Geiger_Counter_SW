@@ -176,7 +176,7 @@ static esp_err_t apply_power_save_mode(bool enabled)
 {
     ESP_RETURN_ON_ERROR(wifi_radio_set_enabled(!enabled), TAG, "set radio state");
     if (!enabled && !wifi_has_credentials()) {
-        ESP_RETURN_ON_ERROR(wifi_prov_start(WIFI_PROV_BOTH), TAG, "start provisioning");
+        ESP_RETURN_ON_ERROR(wifi_prov_start(WIFI_PROV_ALL), TAG, "start provisioning");
     }
     return ESP_OK;
 }
@@ -438,8 +438,8 @@ void app_main(void)
     ESP_ERROR_CHECK(mqtt_init());
 
     if (!settings_get()->power_save_mode && !wifi_has_credentials()) {
-        ESP_LOGI(TAG, "provisioning: BluFi over BLE, or join \"%s\"", wifi_softap_ssid());
-        ESP_ERROR_CHECK(wifi_prov_start(WIFI_PROV_BOTH));
+        ESP_LOGI(TAG, "provisioning: BluFi, ESPTouch, or join \"%s\"", wifi_softap_ssid());
+        ESP_ERROR_CHECK(wifi_prov_start(WIFI_PROV_ALL));
     }
     ESP_ERROR_CHECK(lcd_start_main_screen());
 }

@@ -20,6 +20,7 @@
 #include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_private/esp_clk.h"
+#include "esp_smartconfig.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
@@ -55,6 +56,7 @@ static bool                s_sntp_started;
 static bool                s_radio_enabled;
 
 static void portal_stop(void);
+static esp_err_t smartconfig_stop(void);
 
 static void time_sync_cb(struct timeval *tv)
 {
@@ -208,6 +210,77 @@ static void ip_event_handler(void *arg, esp_event_base_t base, int32_t id, void 
         esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_SUCCESS,
                                         softap_connection_number(), &info);
     }
+}
+
+/* =========================================================================
+ * ESPTouch SmartConfig provisioning
+ * ====================================================================== */
+
+static void smartconfig_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    switch (id) {
+    case SC_EVENT_SCAN_DONE:
+        ESP_LOGI(TAG, "SmartConfig scan complete");
+        break;
+
+    case SC_EVENT_FOUND_CHANNEL:
+        ESP_LOGI(TAG, "SmartConfig found target channel");
+        break;
+
+    case SC_EVENT_GOT_SSID_PSWD: {
+        const smartconfig_event_got_ssid_pswd_t *credentials = data;
+        wifi_config_t config = {0};
+
+        memcpy(config.sta.ssid, credentials->ssid, sizeof(config.sta.ssid));
+        memcpy(config.sta.password, credentials->password, sizeof(config.sta.password));
+        config.sta.bssid_set = credentials->bssid_set;
+        if (credentials->bssid_set) {
+            memcpy(config.sta.bssid, credentials->bssid, sizeof(config.sta.bssid));
+        }
+
+        ESP_LOGI(TAG, "SmartConfig received credentials for %s", config.sta.ssid);
+        s_sta_connecting = false;
+        esp_wifi_disconnect();
+        if (esp_wifi_set_config(WIFI_IF_STA, &config) == ESP_OK) {
+            sta_connect();
+        } else {
+            ESP_LOGE(TAG, "SmartConfig failed to save credentials");
+        }
+        break;
+    }
+
+    case SC_EVENT_SEND_ACK_DONE:
+        ESP_LOGI(TAG, "SmartConfig phone acknowledged provisioning");
+        smartconfig_stop();
+        break;
+
+    default:
+        break;
+    }
+}
+
+static esp_err_t smartconfig_start(void)
+{
+    smartconfig_start_config_t config = SMARTCONFIG_START_CONFIG_DEFAULT();
+
+    ESP_RETURN_ON_ERROR(esp_smartconfig_set_type(SC_TYPE_ESPTOUCH), TAG,
+                        "set SmartConfig type");
+    ESP_RETURN_ON_ERROR(esp_smartconfig_start(&config), TAG, "start SmartConfig");
+    ESP_LOGI(TAG, "SmartConfig listening for ESPTouch credentials");
+    return ESP_OK;
+}
+
+static esp_err_t smartconfig_stop(void)
+{
+    if (!(s_running & WIFI_PROV_SMARTCONFIG)) {
+        return ESP_OK;
+    }
+
+    esp_err_t err = esp_smartconfig_stop();
+    if (err == ESP_OK) {
+        s_running &= ~WIFI_PROV_SMARTCONFIG;
+    }
+    return err;
 }
 
 /* =========================================================================
@@ -1132,6 +1205,10 @@ static void portal_linger_cb(void *arg)
         blufi_stop();
         s_running &= ~WIFI_PROV_BLUFI;
     }
+    if (s_running & WIFI_PROV_SMARTCONFIG) {
+        ESP_LOGI(TAG, "provisioning complete, stopping SmartConfig");
+        smartconfig_stop();
+    }
 }
 
 static esp_err_t portal_start(void)
@@ -1194,6 +1271,9 @@ esp_err_t wifi_prov_init(void)
                         TAG, "wifi events");
     ESP_RETURN_ON_ERROR(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, ip_event_handler, NULL),
                         TAG, "ip events");
+    ESP_RETURN_ON_ERROR(esp_event_handler_register(SC_EVENT, ESP_EVENT_ANY_ID,
+                                                   smartconfig_event_handler, NULL),
+                        TAG, "SmartConfig events");
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_RETURN_ON_ERROR(esp_wifi_init(&cfg), TAG, "wifi init");
@@ -1230,6 +1310,10 @@ esp_err_t wifi_prov_start(wifi_prov_method_t methods)
         ESP_RETURN_ON_ERROR(portal_start(), TAG, "portal start");
         s_running |= WIFI_PROV_SOFTAP;
     }
+    if ((methods & WIFI_PROV_SMARTCONFIG) && !(s_running & WIFI_PROV_SMARTCONFIG)) {
+        ESP_RETURN_ON_ERROR(smartconfig_start(), TAG, "SmartConfig start");
+        s_running |= WIFI_PROV_SMARTCONFIG;
+    }
     return ESP_OK;
 }
 
@@ -1240,6 +1324,9 @@ esp_err_t wifi_prov_stop(void)
     }
     if (s_running & WIFI_PROV_BLUFI) {
         blufi_stop();
+    }
+    if (s_running & WIFI_PROV_SMARTCONFIG) {
+        smartconfig_stop();
     }
     s_running = WIFI_PROV_NONE;
     return ESP_OK;
