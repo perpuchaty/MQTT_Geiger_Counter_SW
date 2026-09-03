@@ -52,6 +52,7 @@ static wifi_prov_method_t  s_running;
 static char                s_ap_ssid[32];
 static esp_timer_handle_t  s_portal_timer;
 static bool                s_sntp_started;
+static bool                s_radio_enabled;
 
 static void portal_stop(void);
 
@@ -125,7 +126,7 @@ static void sta_connect(void)
 
 static bool sta_reconnect(void)
 {
-    if (!s_sta_connecting || s_retries++ >= WIFI_STA_MAX_RETRY) {
+    if (!s_radio_enabled || !s_sta_connecting || s_retries++ >= WIFI_STA_MAX_RETRY) {
         return false;
     }
     s_sta_connecting = (esp_wifi_connect() == ESP_OK);
@@ -1126,6 +1127,11 @@ static void portal_linger_cb(void *arg)
         portal_stop();
         s_running &= ~WIFI_PROV_SOFTAP;
     }
+    if (s_running & WIFI_PROV_BLUFI) {
+        ESP_LOGI(TAG, "provisioning complete, stopping BluFi");
+        blufi_stop();
+        s_running &= ~WIFI_PROV_BLUFI;
+    }
 }
 
 static esp_err_t portal_start(void)
@@ -1199,7 +1205,9 @@ esp_err_t wifi_prov_init(void)
     snprintf(s_ap_ssid, sizeof(s_ap_ssid), "%s-%02X%02X%02X", WIFI_AP_SSID_PREFIX, mac[3], mac[4], mac[5]);
 
     record_conn_info(INVALID_RSSI, INVALID_REASON);
+    s_radio_enabled = true;
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "wifi start");
+    ESP_RETURN_ON_ERROR(esp_wifi_set_ps(WIFI_PS_MIN_MODEM), TAG, "wifi modem sleep");
 
     ESP_RETURN_ON_ERROR(mdns_start(), TAG, "mdns start");
     ESP_RETURN_ON_ERROR(http_start(), TAG, "http start");
@@ -1213,6 +1221,7 @@ esp_err_t wifi_prov_init(void)
 
 esp_err_t wifi_prov_start(wifi_prov_method_t methods)
 {
+    ESP_RETURN_ON_FALSE(s_radio_enabled, ESP_ERR_INVALID_STATE, TAG, "radio disabled");
     if ((methods & WIFI_PROV_BLUFI) && !(s_running & WIFI_PROV_BLUFI)) {
         ESP_RETURN_ON_ERROR(blufi_start(), TAG, "blufi start");
         s_running |= WIFI_PROV_BLUFI;
@@ -1234,6 +1243,39 @@ esp_err_t wifi_prov_stop(void)
     }
     s_running = WIFI_PROV_NONE;
     return ESP_OK;
+}
+
+esp_err_t wifi_radio_set_enabled(bool enabled)
+{
+    if (enabled == s_radio_enabled) {
+        return ESP_OK;
+    }
+
+    if (!enabled) {
+        s_radio_enabled = false;
+        ESP_RETURN_ON_ERROR(wifi_prov_stop(), TAG, "stop provisioning");
+        ESP_RETURN_ON_ERROR(esp_wifi_stop(), TAG, "stop wifi");
+        s_sta_connected = false;
+        s_sta_got_ip = false;
+        s_sta_connecting = false;
+        ESP_LOGI(TAG, "Wi-Fi and BLE radios disabled");
+        return ESP_OK;
+    }
+
+    s_radio_enabled = true;
+    esp_err_t err = esp_wifi_start();
+    if (err != ESP_OK) {
+        s_radio_enabled = false;
+        return err;
+    }
+    ESP_RETURN_ON_ERROR(esp_wifi_set_ps(WIFI_PS_MIN_MODEM), TAG, "wifi modem sleep");
+    ESP_LOGI(TAG, "Wi-Fi enabled with minimum modem power save");
+    return ESP_OK;
+}
+
+bool wifi_radio_is_enabled(void)
+{
+    return s_radio_enabled;
 }
 
 wifi_prov_method_t wifi_prov_running(void)

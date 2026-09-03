@@ -46,6 +46,10 @@ esp_err_t wifi_prov_start(wifi_prov_method_t methods);
 /** Tear down every running transport and go back to plain STA mode. */
 esp_err_t wifi_prov_stop(void);
 
+/** Start or stop Wi-Fi. Disabling also stops every BLE provisioning transport. */
+esp_err_t wifi_radio_set_enabled(bool enabled);
+bool wifi_radio_is_enabled(void);
+
 wifi_prov_method_t wifi_prov_running(void);
 
 /** True once the station got an IP address. */

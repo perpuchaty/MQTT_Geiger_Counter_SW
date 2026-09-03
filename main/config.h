@@ -6,7 +6,7 @@
 #include "driver/gpio.h"
 #include "driver/ledc.h"
 #include "driver/spi_master.h"
-#include "esp_adc/adc_continuous.h"
+#include "esp_adc/adc_oneshot.h"
 #include "esp_err.h"
 #include "u8g2.h"
 
@@ -88,13 +88,11 @@ extern "C" {
 #define BUZZER_CLICK_LONG_MS     50
 
 /* -------------------------------------------------------------------------
- * ADC - continuous (DMA) mode with hardware calibration
+ * ADC - periodic one-shot bursts with hardware calibration
  * ---------------------------------------------------------------------- */
 #define BOARD_ADC_ATTEN         ADC_ATTEN_DB_12    /* full ~0..3.1 V input range */
-#define BOARD_ADC_SAMPLE_HZ     20000
-#define BOARD_ADC_FRAME_BYTES   256                /* must be a multiple of 4 */
-#define BOARD_ADC_POOL_BYTES    1024
-#define BOARD_ADC_IIR_SHIFT     5                  /* averaging time constant: 32 samples/channel */
+#define BOARD_ADC_BURST_SAMPLES 32
+#define BOARD_ADC_INTERVAL_MS   500
 #define TUBE_DIVIDER_TOP_OHM    80000000UL
 #define TUBE_DIVIDER_BOTTOM_OHM 510000UL
 

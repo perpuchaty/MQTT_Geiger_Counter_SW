@@ -65,6 +65,7 @@ typedef struct {
 
     /* Power */
     bool     batt_charge_en;
+    bool     power_save_mode;   /* disable Wi-Fi and BLE radios */
 
     /* High voltage */
     bool     hv_start_enabled;   /* enable the tube HV supply at boot */

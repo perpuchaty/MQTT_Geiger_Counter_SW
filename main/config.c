@@ -6,7 +6,6 @@
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_attr.h"
 #include "esp_check.h"
-#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
@@ -325,24 +324,15 @@ esp_err_t board_buzzer_off(void)
  * ADC - continuous conversion + calibration
  * ====================================================================== */
 
-static adc_continuous_handle_t s_adc;
+static adc_oneshot_unit_handle_t s_adc;
 static adc_cali_handle_t       s_adc_cali[BOARD_ADC_CH_COUNT];
 static adc_channel_t           s_adc_chan[BOARD_ADC_CH_COUNT];
-static volatile int            s_adc_acc[BOARD_ADC_CH_COUNT];  /* IIR accumulator, Q<IIR_SHIFT> */
-static TaskHandle_t            s_adc_task;
+static volatile int            s_adc_raw[BOARD_ADC_CH_COUNT];
 
 static const gpio_num_t s_adc_pin[BOARD_ADC_CH_COUNT] = {
     [BOARD_ADC_VLATCH] = PIN_ADC_VLATCH,
     [BOARD_ADC_TUBE]   = PIN_ADC_TUBE,
 };
-
-static bool IRAM_ATTR adc_conv_done(adc_continuous_handle_t handle,
-                                    const adc_continuous_evt_data_t *edata, void *user_data)
-{
-    BaseType_t hp_woken = pdFALSE;
-    vTaskNotifyGiveFromISR(s_adc_task, &hp_woken);
-    return hp_woken == pdTRUE;
-}
 
 static esp_err_t adc_cali_create(adc_unit_t unit, adc_channel_t chan, adc_cali_handle_t *out)
 {
@@ -367,89 +357,78 @@ static esp_err_t adc_cali_create(adc_unit_t unit, adc_channel_t chan, adc_cali_h
 #endif
 }
 
-static void adc_task(void *arg)
+static void adc_sample_burst(void)
 {
-    uint8_t *frame = heap_caps_malloc(BOARD_ADC_FRAME_BYTES, MALLOC_CAP_DEFAULT);
-    if (!frame) {
-        ESP_LOGE(TAG, "no memory for adc frame");
-        vTaskDelete(NULL);
-        return;
-    }
+    for (int channel = 0; channel < BOARD_ADC_CH_COUNT; channel++) {
+        int sum = 0;
+        int samples = 0;
 
-    for (;;) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-
-        uint32_t len = 0;
-        while (adc_continuous_read(s_adc, frame, BOARD_ADC_FRAME_BYTES, &len, 0) == ESP_OK) {
-            for (uint32_t i = 0; i + SOC_ADC_DIGI_RESULT_BYTES <= len; i += SOC_ADC_DIGI_RESULT_BYTES) {
-                adc_digi_output_data_t *p = (adc_digi_output_data_t *)&frame[i];
-                uint32_t chan = p->type2.channel;
-                uint32_t data = p->type2.data;
-
-                for (int c = 0; c < BOARD_ADC_CH_COUNT; c++) {
-                    if (s_adc_chan[c] != chan) {
-                        continue;
-                    }
-                    int acc = s_adc_acc[c];
-                    s_adc_acc[c] = acc + (int)data - (acc >> BOARD_ADC_IIR_SHIFT);
-                    break;
-                }
+        for (int sample = 0; sample < BOARD_ADC_BURST_SAMPLES; sample++) {
+            int raw;
+            if (adc_oneshot_read(s_adc, s_adc_chan[channel], &raw) == ESP_OK) {
+                sum += raw;
+                samples++;
             }
         }
+
+        if (samples > 0) {
+            s_adc_raw[channel] = (sum + samples / 2) / samples;
+        }
+    }
+}
+
+static void adc_task(void *arg)
+{
+    TickType_t next_sample = xTaskGetTickCount();
+
+    for (;;) {
+        adc_sample_burst();
+        vTaskDelayUntil(&next_sample, pdMS_TO_TICKS(BOARD_ADC_INTERVAL_MS));
     }
 }
 
 static esp_err_t adc_init(void)
 {
     adc_unit_t unit = ADC_UNIT_1;
-    adc_digi_pattern_config_t pattern[BOARD_ADC_CH_COUNT] = {0};
 
     for (int c = 0; c < BOARD_ADC_CH_COUNT; c++) {
         adc_unit_t u;
-        ESP_RETURN_ON_ERROR(adc_continuous_io_to_channel(s_adc_pin[c], &u, &s_adc_chan[c]),
+        ESP_RETURN_ON_ERROR(adc_oneshot_io_to_channel(s_adc_pin[c], &u, &s_adc_chan[c]),
                             TAG, "GPIO%d is not an ADC pin", s_adc_pin[c]);
         ESP_RETURN_ON_FALSE(c == 0 || u == unit, ESP_ERR_INVALID_ARG, TAG,
                             "all ADC pins must belong to the same unit");
         unit = u;
-
-        pattern[c].atten     = BOARD_ADC_ATTEN;
-        pattern[c].channel   = s_adc_chan[c] & 0x7;
-        pattern[c].unit      = unit;
-        pattern[c].bit_width = SOC_ADC_DIGI_MAX_BITWIDTH;
 
         if (adc_cali_create(unit, s_adc_chan[c], &s_adc_cali[c]) != ESP_OK) {
             ESP_LOGW(TAG, "no eFuse calibration for ch %d, raw values only", c);
         }
     }
 
-    adc_continuous_handle_cfg_t hcfg = {
-        .max_store_buf_size = BOARD_ADC_POOL_BYTES,
-        .conv_frame_size    = BOARD_ADC_FRAME_BYTES,
+    adc_oneshot_unit_init_cfg_t unit_cfg = {
+        .unit_id = unit,
     };
-    ESP_RETURN_ON_ERROR(adc_continuous_new_handle(&hcfg, &s_adc), TAG, "adc handle");
+    ESP_RETURN_ON_ERROR(adc_oneshot_new_unit(&unit_cfg, &s_adc), TAG, "adc handle");
 
-    adc_continuous_config_t ccfg = {
-        .pattern_num    = BOARD_ADC_CH_COUNT,
-        .adc_pattern    = pattern,
-        .sample_freq_hz = BOARD_ADC_SAMPLE_HZ,
-        .conv_mode      = ADC_CONV_SINGLE_UNIT_1,
-        .format         = ADC_DIGI_OUTPUT_FORMAT_TYPE2,
+    adc_oneshot_chan_cfg_t channel_cfg = {
+        .atten = BOARD_ADC_ATTEN,
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
     };
-    ESP_RETURN_ON_ERROR(adc_continuous_config(s_adc, &ccfg), TAG, "adc config");
+    for (int c = 0; c < BOARD_ADC_CH_COUNT; c++) {
+        ESP_RETURN_ON_ERROR(adc_oneshot_config_channel(s_adc, s_adc_chan[c], &channel_cfg),
+                            TAG, "adc channel %d", c);
+    }
 
-    ESP_RETURN_ON_FALSE(xTaskCreate(adc_task, "adc", 3072, NULL, 6, &s_adc_task) == pdPASS,
-                        ESP_ERR_NO_MEM, TAG, "adc task");
+    adc_sample_burst();
 
-    adc_continuous_evt_cbs_t cbs = { .on_conv_done = adc_conv_done };
-    ESP_RETURN_ON_ERROR(adc_continuous_register_event_callbacks(s_adc, &cbs, NULL), TAG, "adc cbs");
-
-    return adc_continuous_start(s_adc);
+    return xTaskCreate(adc_task, "adc", 2048, NULL, 6, NULL) == pdPASS
+               ? ESP_OK
+               : ESP_ERR_NO_MEM;
 }
 
 esp_err_t board_adc_get_raw(board_adc_ch_t ch, int *raw)
 {
     ESP_RETURN_ON_FALSE(ch < BOARD_ADC_CH_COUNT && raw, ESP_ERR_INVALID_ARG, TAG, "bad arg");
-    *raw = s_adc_acc[ch] >> BOARD_ADC_IIR_SHIFT;
+    *raw = s_adc_raw[ch];
     return ESP_OK;
 }
 
