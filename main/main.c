@@ -129,6 +129,10 @@ static void power_off_timer_cb(void *arg)
 static void power_off(void)
 {
     ESP_LOGI(TAG, "Shutdown confirmed");
+    esp_err_t hv_err = board_hv_set_enabled(false);
+    if (hv_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to disable high voltage: %s", esp_err_to_name(hv_err));
+    }
     board_buzzer_off();
     lcd_fade_out_and_clear();
     board_set_latch(false);
