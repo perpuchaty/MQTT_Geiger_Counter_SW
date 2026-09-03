@@ -17,6 +17,7 @@ static const char *TAG = "lcd";
 static volatile uint8_t s_backlight_target;
 static volatile uint8_t s_backlight_current;
 static volatile int64_t s_last_activity_us;
+static volatile bool s_display_busy;
 
 #define LCD_AUTO_DIM_DELAY_US (30LL * 1000000LL)
 #define LCD_MENU_ITEM_COUNT   8
@@ -707,18 +708,21 @@ void lcd_request_shutdown_confirmation(void)
 
 void lcd_fade_out_and_clear(void)
 {
+    s_screen = LCD_SCREEN_OFF;
     s_backlight_target = 0;
     while (s_backlight_current > 0) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
-    s_screen = LCD_SCREEN_OFF;
-    vTaskDelay(pdMS_TO_TICKS(300));
+    while (s_display_busy) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
 
     u8g2_t *display = board_lcd();
     if (display != NULL) {
         u8g2_ClearBuffer(display);
         u8g2_SendBuffer(display);
+        u8g2_SetPowerSave(display, 1);
     }
 }
 
@@ -730,6 +734,7 @@ bool lcd_lamp_test_active(void)
 static void main_screen_task(void *arg)
 {
     for (;;) {
+        s_display_busy = true;
         switch (s_screen) {
         case LCD_SCREEN_MAIN:
             draw_main_screen();
@@ -764,6 +769,7 @@ static void main_screen_task(void *arg)
         case LCD_SCREEN_OFF:
             break;
         }
+        s_display_busy = false;
         vTaskDelay(pdMS_TO_TICKS(250));
     }
 }
