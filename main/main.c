@@ -1,6 +1,7 @@
 #include "config.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_pm.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -255,6 +256,18 @@ static void nvs_bringup(void)
     ESP_ERROR_CHECK(err);
 }
 
+static void power_management_init(void)
+{
+    const esp_pm_config_t config = {
+        .max_freq_mhz = 160,
+        .min_freq_mhz = 40,
+        .light_sleep_enable = true,
+    };
+
+    ESP_ERROR_CHECK(esp_pm_configure(&config));
+    ESP_LOGI(TAG, "Power management enabled: CPU 40-160 MHz, automatic light sleep");
+}
+
 static void wait_for_power_on(void)
 {
     ESP_LOGI(TAG, "Waiting for a 3 second Enter hold");
@@ -342,6 +355,7 @@ static void wait_for_power_on(void)
 
 void app_main(void)
 {
+    power_management_init();
     nvs_bringup();
     ESP_ERROR_CHECK(settings_init());   /* everything below reads settings_get() */
     ESP_ERROR_CHECK(history_store_init());
