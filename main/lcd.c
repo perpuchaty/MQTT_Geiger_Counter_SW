@@ -801,6 +801,16 @@ void lcd_draw_startup_screen(void)
     u8g2_SendBuffer(display);
 }
 
+void lcd_clear(void)
+{
+    u8g2_t *display = board_lcd();
+
+    if (display != NULL) {
+        u8g2_ClearBuffer(display);
+        u8g2_SendBuffer(display);
+    }
+}
+
 void lcd_draw_battery_status(lcd_battery_state_t state, uint8_t frame)
 {
     u8g2_t *display = board_lcd();

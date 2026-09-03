@@ -111,6 +111,7 @@ typedef struct {
 #define POWER_OFF_HOLD_US (3ULL * 1000 * 1000)
 #define POWER_ON_HOLD_US  (3LL * 1000 * 1000)
 #define STANDBY_BACKLIGHT_US (3LL * 1000 * 1000)
+#define STANDBY_CLEAR_US (3LL * 1000 * 1000)
 #define POWER_ON_POLL_MS 20
 #define POWER_ON_FRAME_US (200LL * 1000)
 
@@ -252,26 +253,42 @@ static void nvs_bringup(void)
 
 static void wait_for_power_on(void)
 {
-    if (!board_input_level(BOARD_IN_BTN_ENTER)) {
-        ESP_LOGI(TAG, "Enter held at startup, continuing");
-        return;
-    }
-
     ESP_LOGI(TAG, "Waiting for a 3 second Enter hold");
     int64_t pressed_since_us = 0;
     int64_t backlight_off_at_us = esp_timer_get_time() + STANDBY_BACKLIGHT_US;
+    int64_t clear_at_us = backlight_off_at_us + STANDBY_CLEAR_US;
     int64_t next_frame_at_us = 0;
     uint8_t animation_frame = 0;
+    uint8_t breath_phase = 0;
+    uint8_t breath_accumulator = 0;
     bool backlight_on = true;
+    bool screen_visible = true;
     bool enter_was_pressed = false;
 
     for (;;) {
         int64_t now_us = esp_timer_get_time();
         bool enter_pressed = !board_input_level(BOARD_IN_BTN_ENTER);
 
+        uint8_t breath_level = breath_phase <= 100 ? breath_phase : 200 - breath_phase;
+        breath_accumulator += breath_level;
+        board_set_led(breath_accumulator >= 100);
+        if (breath_accumulator >= 100) {
+            breath_accumulator -= 100;
+        }
+        breath_phase = breath_phase == 199 ? 0 : breath_phase + 1;
+
         if (enter_pressed != enter_was_pressed) {
             ESP_LOGI(TAG, "Startup Enter %s", enter_pressed ? "pressed" : "released");
             enter_was_pressed = enter_pressed;
+            if (enter_pressed) {
+                lcd_set_backlight(settings_get()->lcd_brightness);
+                backlight_on = true;
+                screen_visible = true;
+                next_frame_at_us = 0;
+            } else {
+                backlight_off_at_us = now_us + STANDBY_BACKLIGHT_US;
+                clear_at_us = backlight_off_at_us + STANDBY_CLEAR_US;
+            }
         }
 
         if (enter_pressed) {
@@ -279,6 +296,7 @@ static void wait_for_power_on(void)
                 pressed_since_us = now_us;
             } else if (now_us - pressed_since_us >= POWER_ON_HOLD_US) {
                 ESP_LOGI(TAG, "Enter held for 3 seconds, continuing startup");
+                board_set_led(false);
                 lcd_set_backlight(settings_get()->lcd_brightness);
                 return;
             }
@@ -291,7 +309,12 @@ static void wait_for_power_on(void)
             backlight_on = false;
         }
 
-        if (now_us >= next_frame_at_us) {
+        if (screen_visible && !enter_pressed && now_us >= clear_at_us) {
+            lcd_clear();
+            screen_visible = false;
+        }
+
+        if (screen_visible && now_us >= next_frame_at_us) {
             bool charging_high = board_input_level(BOARD_IN_CHRG);
             bool standby_high = board_input_level(BOARD_IN_STBY);
             lcd_battery_state_t battery_state;
