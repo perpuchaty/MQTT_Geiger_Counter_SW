@@ -10,6 +10,7 @@
 #include "freertos/task.h"
 #include "geiger.h"
 #include "mqtt.h"
+#include "ota.h"
 #include "settings.h"
 #include "wifi_prov.h"
 
@@ -21,7 +22,7 @@ static volatile bool s_display_busy;
 static TaskHandle_t s_display_task;
 
 #define LCD_AUTO_DIM_DELAY_US  (30LL * 1000000LL)
-#define LCD_MENU_ITEM_COUNT    8
+#define LCD_MENU_ITEM_COUNT    9
 #define LCD_SYSTEM_FIELD_COUNT 5
 
 typedef enum {
@@ -34,6 +35,7 @@ typedef enum {
     LCD_SCREEN_TUBE,
     LCD_SCREEN_TIME,
     LCD_SCREEN_HV,
+    LCD_SCREEN_FIRMWARE,
     LCD_SCREEN_LAMP_TEST,
     LCD_SCREEN_POWER_SAVE,
     LCD_SCREEN_SHUTDOWN,
@@ -57,6 +59,8 @@ static bool s_time_editing;
 static settings_t s_time_settings;
 static uint8_t s_hv_field;
 static bool s_hv_editing;
+static bool s_firmware_install_confirm;
+static esp_err_t s_firmware_action_error;
 static volatile bool s_lamp_test_active;
 
 static void backlight_fade_task(void *arg)
@@ -251,7 +255,8 @@ static void draw_menu_screen(void)
 {
     u8g2_t *display = board_lcd();
     const char *items[] = { "Main screen", "Wi-Fi settings", "MQTT status", "System settings",
-                            "Tube settings", "Time settings", "High voltage", "Lamp test" };
+                            "Tube settings", "Time settings", "High voltage", "Firmware Update",
+                            "Lamp test" };
     const size_t item_count = sizeof(items) / sizeof(items[0]);
     const uint8_t first_item = s_menu_item < 2 ? 0 : s_menu_item - 1;
     const int item_y[] = { 29, 49 };
@@ -279,6 +284,67 @@ static void draw_menu_screen(void)
     u8g2_DrawFrame(display, LCD_WIDTH - 8, scrollbar_y, 5, scrollbar_h);
     u8g2_DrawBox(display, LCD_WIDTH - 7, thumb_y + 1, 3, thumb_h - 2);
     u8g2_SetFont(display, u8g2_font_5x7_tf);
+    u8g2_SendBuffer(display);
+}
+
+static void draw_firmware_screen(void)
+{
+    u8g2_t *display = board_lcd();
+    ota_status_t status = {0};
+    char text[32];
+
+    if (display == NULL) {
+        return;
+    }
+
+    ota_get_status(&status);
+    u8g2_ClearBuffer(display);
+    u8g2_SetFont(display, u8g2_font_6x10_tf);
+    u8g2_DrawStr(display, 4, 10, "FIRMWARE UPDATE");
+    u8g2_DrawHLine(display, 0, 13, LCD_WIDTH);
+    u8g2_SetFont(display, u8g2_font_5x7_tf);
+    snprintf(text, sizeof(text), "INSTALLED: %.14s", status.current_version);
+    u8g2_DrawStr(display, 4, 24, text);
+    snprintf(text, sizeof(text), "ONLINE: %.17s",
+             status.available_version[0] ? status.available_version : "UNKNOWN");
+    u8g2_DrawStr(display, 4, 35, text);
+
+    if (status.updating) {
+        const int progress = status.progress_pct < 0 ? 0
+                             : status.progress_pct > 100 ? 100
+                             : status.progress_pct;
+        const int bar_x = 4;
+        const int bar_y = 50;
+        const int bar_width = LCD_WIDTH - 8;
+        const int bar_height = 11;
+        const int fill_width = (bar_width - 4) * progress / 100;
+
+        snprintf(text, sizeof(text), "DOWNLOADING  %d%%", progress);
+        u8g2_DrawStr(display, (LCD_WIDTH - u8g2_GetStrWidth(display, text)) / 2, 46, text);
+        u8g2_DrawFrame(display, bar_x, bar_y, bar_width, bar_height);
+        if (fill_width > 0) {
+            u8g2_DrawBox(display, bar_x + 2, bar_y + 2, fill_width, bar_height - 4);
+        }
+    } else if (status.checking) {
+        u8g2_DrawStr(display, 4, 46, "CHECKING SERVER...");
+        u8g2_DrawStr(display, 4, 58, "LEFT BACK");
+    } else if (s_firmware_install_confirm) {
+        u8g2_DrawStr(display, 4, 46, "INSTALL THIS VERSION?");
+        u8g2_DrawStr(display, 4, 58, "ENTER YES  LEFT NO");
+    } else {
+        esp_err_t error = s_firmware_action_error != ESP_OK
+                              ? s_firmware_action_error
+                              : status.last_error;
+        if (error != ESP_OK) {
+            snprintf(text, sizeof(text), "ERROR: %.19s", esp_err_to_name(error));
+        } else if (status.update_available) {
+            snprintf(text, sizeof(text), "NEW VERSION AVAILABLE");
+        } else {
+            snprintf(text, sizeof(text), "ENTER INSTALL");
+        }
+        u8g2_DrawStr(display, 4, 46, text);
+        u8g2_DrawStr(display, 4, 58, "LEFT BACK  RIGHT CHECK");
+    }
     u8g2_SendBuffer(display);
 }
 
@@ -701,6 +767,10 @@ lcd_action_t lcd_handle_button(board_input_t input, bool pressed)
                 s_hv_field = 0;
                 s_hv_editing = false;
                 s_screen = LCD_SCREEN_HV;
+            } else if (s_menu_item == 7) {
+                s_firmware_install_confirm = false;
+                s_firmware_action_error = ESP_OK;
+                s_screen = LCD_SCREEN_FIRMWARE;
             } else {
                 s_lamp_test_active = true;
                 s_screen = LCD_SCREEN_LAMP_TEST;
@@ -839,6 +909,30 @@ lcd_action_t lcd_handle_button(board_input_t input, bool pressed)
             }
         }
         break;
+    case LCD_SCREEN_FIRMWARE: {
+        ota_status_t status = {0};
+        ota_get_status(&status);
+        if (input == BOARD_IN_BTN_ENTER && !status.checking && !status.updating) {
+            if (s_firmware_install_confirm) {
+                s_firmware_action_error = ota_start_update();
+                if (s_firmware_action_error == ESP_OK) {
+                    s_firmware_install_confirm = false;
+                }
+            } else {
+                s_firmware_install_confirm = true;
+            }
+        } else if (input == BOARD_IN_BTN_LEFT && !status.updating) {
+            if (s_firmware_install_confirm) {
+                s_firmware_install_confirm = false;
+            } else {
+                s_screen = LCD_SCREEN_MENU;
+            }
+        } else if (input == BOARD_IN_BTN_RIGHT && !status.checking && !status.updating) {
+            s_firmware_install_confirm = false;
+            s_firmware_action_error = ota_check_on_connect();
+        }
+        break;
+    }
     case LCD_SCREEN_LAMP_TEST:
         if (input == BOARD_IN_BTN_LEFT) {
             s_lamp_test_active = false;
@@ -947,6 +1041,9 @@ static void main_screen_task(void *arg)
         case LCD_SCREEN_HV:
             draw_hv_screen();
             break;
+        case LCD_SCREEN_FIRMWARE:
+            draw_firmware_screen();
+            break;
         case LCD_SCREEN_LAMP_TEST:
             draw_lamp_test_screen();
             break;
@@ -960,7 +1057,8 @@ static void main_screen_task(void *arg)
             break;
         }
         s_display_busy = false;
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        TickType_t wait = s_screen == LCD_SCREEN_FIRMWARE ? pdMS_TO_TICKS(250) : portMAX_DELAY;
+        ulTaskNotifyTake(pdTRUE, wait);
     }
 }
 

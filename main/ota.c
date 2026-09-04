@@ -143,7 +143,7 @@ static void check_task(void *arg)
     s_status.checking = false;
     s_status.last_error = err;
     s_status.update_available = available;
-    if (available) {
+    if (err == ESP_OK) {
         strlcpy(s_status.available_version, candidate.version, sizeof(s_status.available_version));
     } else {
         s_status.available_version[0] = '\0';
@@ -151,7 +151,7 @@ static void check_task(void *arg)
     status_unlock();
 
     if (err == ESP_OK) {
-        store_available(available ? candidate.version : NULL);
+        store_available(candidate.version);
         ESP_LOGI(TAG, "online firmware %s, installed firmware %s",
                  candidate.version, s_status.current_version);
         if (available) {
@@ -223,11 +223,9 @@ esp_err_t ota_init(void)
     s_status.last_error = ESP_OK;
     load_available();
 
-    if (s_status.update_available &&
-        strcmp(s_status.available_version, s_status.current_version) == 0) {
-        s_status.update_available = false;
-        s_status.available_version[0] = '\0';
-        store_available(NULL);
+    if (s_status.update_available) {
+        s_status.update_available = compare_versions(s_status.available_version,
+                                                     s_status.current_version) > 0;
     }
 
     return ESP_OK;
