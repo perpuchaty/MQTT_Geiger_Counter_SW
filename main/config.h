@@ -172,6 +172,7 @@ esp_err_t board_buzzer_off(void);
 esp_err_t board_adc_get_raw(board_adc_ch_t ch, int *raw);
 esp_err_t board_adc_get_mv(board_adc_ch_t ch, int *mv);
 esp_err_t board_tube_voltage_get_mv(int *mv);
+uint8_t board_battery_percentage(int voltage_mv);
 
 /* LCD, NULL when the display pins are set to -1 */
 u8g2_t *board_lcd(void);

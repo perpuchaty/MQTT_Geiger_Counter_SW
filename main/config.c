@@ -467,6 +467,34 @@ esp_err_t board_tube_voltage_get_mv(int *mv)
     return ESP_OK;
 }
 
+uint8_t board_battery_percentage(int voltage_mv)
+{
+    static const struct {
+        int voltage_mv;
+        uint8_t percentage;
+    } points[] = {
+        { 3300, 0 },
+        { 3600, 20 },
+        { 3700, 40 },
+        { 3800, 60 },
+        { 3950, 80 },
+        { 4200, 100 },
+    };
+
+    if (voltage_mv <= points[0].voltage_mv) {
+        return 0;
+    }
+    for (size_t i = 1; i < sizeof(points) / sizeof(points[0]); i++) {
+        if (voltage_mv <= points[i].voltage_mv) {
+            int voltage_span = points[i].voltage_mv - points[i - 1].voltage_mv;
+            int percentage_span = points[i].percentage - points[i - 1].percentage;
+            return points[i - 1].percentage +
+                   (voltage_mv - points[i - 1].voltage_mv) * percentage_span / voltage_span;
+        }
+    }
+    return 100;
+}
+
 /* =========================================================================
  * LCD - ST7565P on hardware SPI, driven through u8g2
  * ====================================================================== */

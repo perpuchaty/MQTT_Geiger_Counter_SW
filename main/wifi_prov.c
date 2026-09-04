@@ -180,6 +180,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
     default:
         break;
     }
+    lcd_refresh();
 }
 
 static void ip_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -188,6 +189,7 @@ static void ip_event_handler(void *arg, esp_event_base_t base, int32_t id, void 
         return;
     }
     s_sta_got_ip = true;
+    lcd_refresh();
     ESP_LOGI(TAG, "got ip " IPSTR ", web ui on http://" WIFI_MDNS_HOSTNAME ".local",
              IP2STR(&((ip_event_got_ip_t *)data)->ip_info.ip));
     time_sync_start();

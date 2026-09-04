@@ -15,6 +15,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "geiger.h"
+#include "lcd.h"
 #include "mqtt_client.h"
 #include "settings.h"
 #include "wifi_prov.h"
@@ -190,6 +191,7 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
     default:
         break;
     }
+    lcd_refresh();
 }
 
 static void mqtt_client_stop(void)
@@ -260,6 +262,7 @@ esp_err_t mqtt_apply(void)
         err = mqtt_client_start();
     }
     xSemaphoreGive(s_lock);
+    lcd_refresh();
     return err;
 }
 

@@ -126,34 +126,6 @@ static void draw_wifi_icon(u8g2_t *display, int x, int y, bool connected)
     }
 }
 
-static uint8_t battery_percentage(int voltage_mv)
-{
-    static const struct {
-        int voltage_mv;
-        uint8_t percentage;
-    } points[] = {
-        { 3300, 0 },
-        { 3600, 20 },
-        { 3700, 40 },
-        { 3800, 60 },
-        { 3950, 80 },
-        { 4200, 100 },
-    };
-
-    if (voltage_mv <= points[0].voltage_mv) {
-        return 0;
-    }
-    for (size_t i = 1; i < sizeof(points) / sizeof(points[0]); i++) {
-        if (voltage_mv <= points[i].voltage_mv) {
-            int voltage_span = points[i].voltage_mv - points[i - 1].voltage_mv;
-            int percentage_span = points[i].percentage - points[i - 1].percentage;
-            return points[i - 1].percentage +
-                   (voltage_mv - points[i - 1].voltage_mv) * percentage_span / voltage_span;
-        }
-    }
-    return 100;
-}
-
 static void draw_battery_icon(u8g2_t *display, int x, int y)
 {
     const int width = 19;
@@ -173,7 +145,7 @@ static void draw_battery_icon(u8g2_t *display, int x, int y)
     if (board_adc_get_mv(BOARD_ADC_VLATCH, &voltage_mv) != ESP_OK) {
         return;
     }
-    uint8_t bars = (battery_percentage(voltage_mv) + 24) / 25;
+    uint8_t bars = (board_battery_percentage(voltage_mv) + 24) / 25;
     for (uint8_t bar = 0; bar < bars; bar++) {
         u8g2_DrawBox(display, x + 2 + bar * 4, y + 2, 3, height - 4);
     }
