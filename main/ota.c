@@ -1,6 +1,8 @@
 #include "ota.h"
 
+#include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_check.h"
@@ -102,6 +104,31 @@ static esp_err_t open_image(esp_https_ota_handle_t *handle, esp_app_desc_t *desc
     return err;
 }
 
+static int compare_versions(const char *candidate, const char *current)
+{
+    if (*candidate == 'v' || *candidate == 'V') candidate++;
+    if (*current == 'v' || *current == 'V') current++;
+
+    while (isdigit((unsigned char)*candidate) || isdigit((unsigned char)*current)) {
+        char *candidate_end;
+        char *current_end;
+        unsigned long candidate_part = strtoul(candidate, &candidate_end, 10);
+        unsigned long current_part = strtoul(current, &current_end, 10);
+        if (candidate_part != current_part) {
+            return candidate_part > current_part ? 1 : -1;
+        }
+        candidate = *candidate_end == '.' ? candidate_end + 1 : candidate_end;
+        current = *current_end == '.' ? current_end + 1 : current_end;
+    }
+
+    bool candidate_prerelease = *candidate == '-';
+    bool current_prerelease = *current == '-';
+    if (candidate_prerelease != current_prerelease) {
+        return candidate_prerelease ? -1 : 1;
+    }
+    return strcmp(candidate, current);
+}
+
 static void check_task(void *arg)
 {
     esp_https_ota_handle_t handle = NULL;
@@ -111,7 +138,7 @@ static void check_task(void *arg)
         esp_https_ota_abort(handle);
     }
 
-    bool available = err == ESP_OK && strcmp(candidate.version, s_status.current_version) != 0;
+    bool available = err == ESP_OK && compare_versions(candidate.version, s_status.current_version) > 0;
     status_lock();
     s_status.checking = false;
     s_status.last_error = err;
@@ -125,8 +152,10 @@ static void check_task(void *arg)
 
     if (err == ESP_OK) {
         store_available(available ? candidate.version : NULL);
+        ESP_LOGI(TAG, "online firmware %s, installed firmware %s",
+                 candidate.version, s_status.current_version);
         if (available) {
-            ESP_LOGI(TAG, "firmware %s is available", candidate.version);
+            ESP_LOGW(TAG, "firmware update %s is available", candidate.version);
         } else {
             ESP_LOGI(TAG, "firmware is up to date");
         }

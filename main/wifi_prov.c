@@ -20,7 +20,6 @@
 #include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_private/esp_clk.h"
-#include "esp_smartconfig.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
@@ -29,6 +28,8 @@
 #include "freertos/task.h"
 #include "geiger.h"
 #include "history_store.h"
+#include "host/ble_gatt.h"
+#include "host/ble_hs.h"
 #include "lcd.h"
 #include "lwip/sockets.h"
 #include "mdns.h"
@@ -56,7 +57,6 @@ static bool                s_sntp_started;
 static bool                s_radio_enabled;
 
 static void portal_stop(void);
-static esp_err_t smartconfig_stop(void);
 
 static void time_sync_cb(struct timeval *tv)
 {
@@ -86,11 +86,38 @@ static bool     s_sta_connected;
 static bool     s_sta_got_ip;
 static bool     s_sta_connecting;
 static bool     s_ble_connected;
+static uint16_t s_blufi_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static uint8_t  s_retries;
 static uint8_t  s_sta_bssid[6];
 static uint8_t  s_sta_ssid[32];
 static int      s_sta_ssid_len;
 static esp_blufi_extra_info_t s_conn_info;
+
+typedef struct {
+    uint8_t *pkt;
+    int pkt_len;
+} blufi_packet_info_t;
+
+void __wrap_esp_blufi_send_notify(void *arg)
+{
+    blufi_packet_info_t *packet = arg;
+
+    if (!s_ble_connected || s_blufi_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        ESP_LOGW(TAG, "dropping BLUFI reply without an active BLE connection");
+        return;
+    }
+
+    struct os_mbuf *buffer = ble_hs_mbuf_from_flat(packet->pkt, packet->pkt_len);
+    if (!buffer) {
+        ESP_LOGE(TAG, "failed to allocate BLUFI notification buffer");
+        return;
+    }
+
+    int rc = ble_gatts_notify_custom(s_blufi_conn_handle, gatt_values[1].val_handle, buffer);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "failed to send BLUFI notification: rc=%d", rc);
+    }
+}
 
 extern const char index_html_start[] asm("_binary_index_html_start");
 extern const char index_html_end[]   asm("_binary_index_html_end");
@@ -121,9 +148,15 @@ static void record_conn_info(int rssi, uint8_t reason)
 
 static void sta_connect(void)
 {
+    esp_err_t err;
+
     s_retries = 0;
-    s_sta_connecting = (esp_wifi_connect() == ESP_OK);
+    err = esp_wifi_connect();
+    s_sta_connecting = (err == ESP_OK);
     record_conn_info(INVALID_RSSI, INVALID_REASON);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "failed to start station connection: %s", esp_err_to_name(err));
+    }
 }
 
 static bool sta_reconnect(void)
@@ -215,77 +248,6 @@ static void ip_event_handler(void *arg, esp_event_base_t base, int32_t id, void 
 }
 
 /* =========================================================================
- * ESPTouch SmartConfig provisioning
- * ====================================================================== */
-
-static void smartconfig_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
-{
-    switch (id) {
-    case SC_EVENT_SCAN_DONE:
-        ESP_LOGI(TAG, "SmartConfig scan complete");
-        break;
-
-    case SC_EVENT_FOUND_CHANNEL:
-        ESP_LOGI(TAG, "SmartConfig found target channel");
-        break;
-
-    case SC_EVENT_GOT_SSID_PSWD: {
-        const smartconfig_event_got_ssid_pswd_t *credentials = data;
-        wifi_config_t config = {0};
-
-        memcpy(config.sta.ssid, credentials->ssid, sizeof(config.sta.ssid));
-        memcpy(config.sta.password, credentials->password, sizeof(config.sta.password));
-        config.sta.bssid_set = credentials->bssid_set;
-        if (credentials->bssid_set) {
-            memcpy(config.sta.bssid, credentials->bssid, sizeof(config.sta.bssid));
-        }
-
-        ESP_LOGI(TAG, "SmartConfig received credentials for %s", config.sta.ssid);
-        s_sta_connecting = false;
-        esp_wifi_disconnect();
-        if (esp_wifi_set_config(WIFI_IF_STA, &config) == ESP_OK) {
-            sta_connect();
-        } else {
-            ESP_LOGE(TAG, "SmartConfig failed to save credentials");
-        }
-        break;
-    }
-
-    case SC_EVENT_SEND_ACK_DONE:
-        ESP_LOGI(TAG, "SmartConfig phone acknowledged provisioning");
-        smartconfig_stop();
-        break;
-
-    default:
-        break;
-    }
-}
-
-static esp_err_t smartconfig_start(void)
-{
-    smartconfig_start_config_t config = SMARTCONFIG_START_CONFIG_DEFAULT();
-
-    ESP_RETURN_ON_ERROR(esp_smartconfig_set_type(SC_TYPE_ESPTOUCH), TAG,
-                        "set SmartConfig type");
-    ESP_RETURN_ON_ERROR(esp_smartconfig_start(&config), TAG, "start SmartConfig");
-    ESP_LOGI(TAG, "SmartConfig listening for ESPTouch credentials");
-    return ESP_OK;
-}
-
-static esp_err_t smartconfig_stop(void)
-{
-    if (!(s_running & WIFI_PROV_SMARTCONFIG)) {
-        return ESP_OK;
-    }
-
-    esp_err_t err = esp_smartconfig_stop();
-    if (err == ESP_OK) {
-        s_running &= ~WIFI_PROV_SMARTCONFIG;
-    }
-    return err;
-}
-
-/* =========================================================================
  * BluFi (BLE provisioning)
  * ====================================================================== */
 
@@ -358,13 +320,17 @@ static void blufi_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_
 
     case ESP_BLUFI_EVENT_BLE_CONNECT:
         s_ble_connected = true;
+        s_blufi_conn_handle = param->connect.conn_id;
         esp_blufi_adv_stop();
         blufi_security_init();
+        ESP_LOGI(TAG, "BLUFI client connected; waiting for Wi-Fi credentials");
         break;
 
     case ESP_BLUFI_EVENT_BLE_DISCONNECT:
         s_ble_connected = false;
+        s_blufi_conn_handle = BLE_HS_CONN_HANDLE_NONE;
         blufi_security_deinit();
+        ESP_LOGI(TAG, "BLUFI client disconnected");
 #if SOC_MPI_SUPPORTED
         esp_blufi_adv_start();
 #else
@@ -373,14 +339,24 @@ static void blufi_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_
         break;
 
     case ESP_BLUFI_EVENT_SET_WIFI_OPMODE:
-        esp_wifi_set_mode(param->wifi_mode.op_mode);
+        ESP_LOGI(TAG, "BLUFI requested Wi-Fi mode %d", param->wifi_mode.op_mode);
+        if (esp_wifi_set_mode(param->wifi_mode.op_mode) != ESP_OK) {
+            esp_blufi_send_error_info(ESP_BLUFI_MSG_STATE_ERROR);
+        }
         break;
 
-    case ESP_BLUFI_EVENT_REQ_CONNECT_TO_AP:
+    case ESP_BLUFI_EVENT_REQ_CONNECT_TO_AP: {
+        ESP_LOGI(TAG, "BLUFI requested connection to \"%s\"", sta_cfg.sta.ssid);
         esp_wifi_disconnect();
-        esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
+        esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "failed to save BLUFI credentials: %s", esp_err_to_name(err));
+            esp_blufi_send_error_info(ESP_BLUFI_MSG_STATE_ERROR);
+            break;
+        }
         sta_connect();
         break;
+    }
 
     case ESP_BLUFI_EVENT_REQ_DISCONNECT_FROM_AP:
         esp_wifi_disconnect();
@@ -393,6 +369,8 @@ static void blufi_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_
         }
         memset(sta_cfg.sta.ssid, 0, sizeof(sta_cfg.sta.ssid));
         memcpy(sta_cfg.sta.ssid, param->sta_ssid.ssid, param->sta_ssid.ssid_len);
+        sta_cfg.sta.bssid_set = false;
+        ESP_LOGI(TAG, "BLUFI received SSID \"%s\"", sta_cfg.sta.ssid);
         break;
 
     case ESP_BLUFI_EVENT_RECV_STA_PASSWD:
@@ -402,11 +380,13 @@ static void blufi_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_
         }
         memset(sta_cfg.sta.password, 0, sizeof(sta_cfg.sta.password));
         memcpy(sta_cfg.sta.password, param->sta_passwd.passwd, param->sta_passwd.passwd_len);
+        ESP_LOGI(TAG, "BLUFI received Wi-Fi password (%d bytes)", param->sta_passwd.passwd_len);
         break;
 
     case ESP_BLUFI_EVENT_RECV_STA_BSSID:
         memcpy(sta_cfg.sta.bssid, param->sta_bssid.bssid, sizeof(sta_cfg.sta.bssid));
         sta_cfg.sta.bssid_set = 1;
+        ESP_LOGI(TAG, "BLUFI received access-point BSSID");
         break;
 
     case ESP_BLUFI_EVENT_RECV_SOFTAP_SSID:
@@ -431,6 +411,7 @@ static void blufi_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_
         break;
 
     case ESP_BLUFI_EVENT_GET_WIFI_LIST: {
+        ESP_LOGI(TAG, "BLUFI requested Wi-Fi scan");
         wifi_scan_config_t scan = { .show_hidden = true };
         if (esp_wifi_scan_start(&scan, true) != ESP_OK) {
             esp_blufi_send_error_info(ESP_BLUFI_WIFI_SCAN_FAIL);
@@ -486,6 +467,7 @@ static void blufi_stop(void)
     esp_blufi_controller_deinit();
 #endif
     s_ble_connected = false;
+    s_blufi_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 }
 
 /* =========================================================================
@@ -1207,10 +1189,6 @@ static void portal_linger_cb(void *arg)
         blufi_stop();
         s_running &= ~WIFI_PROV_BLUFI;
     }
-    if (s_running & WIFI_PROV_SMARTCONFIG) {
-        ESP_LOGI(TAG, "provisioning complete, stopping SmartConfig");
-        smartconfig_stop();
-    }
 }
 
 static esp_err_t portal_start(void)
@@ -1273,9 +1251,6 @@ esp_err_t wifi_prov_init(void)
                         TAG, "wifi events");
     ESP_RETURN_ON_ERROR(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, ip_event_handler, NULL),
                         TAG, "ip events");
-    ESP_RETURN_ON_ERROR(esp_event_handler_register(SC_EVENT, ESP_EVENT_ANY_ID,
-                                                   smartconfig_event_handler, NULL),
-                        TAG, "SmartConfig events");
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_RETURN_ON_ERROR(esp_wifi_init(&cfg), TAG, "wifi init");
@@ -1312,10 +1287,6 @@ esp_err_t wifi_prov_start(wifi_prov_method_t methods)
         ESP_RETURN_ON_ERROR(portal_start(), TAG, "portal start");
         s_running |= WIFI_PROV_SOFTAP;
     }
-    if ((methods & WIFI_PROV_SMARTCONFIG) && !(s_running & WIFI_PROV_SMARTCONFIG)) {
-        ESP_RETURN_ON_ERROR(smartconfig_start(), TAG, "SmartConfig start");
-        s_running |= WIFI_PROV_SMARTCONFIG;
-    }
     return ESP_OK;
 }
 
@@ -1326,9 +1297,6 @@ esp_err_t wifi_prov_stop(void)
     }
     if (s_running & WIFI_PROV_BLUFI) {
         blufi_stop();
-    }
-    if (s_running & WIFI_PROV_SMARTCONFIG) {
-        smartconfig_stop();
     }
     s_running = WIFI_PROV_NONE;
     return ESP_OK;
