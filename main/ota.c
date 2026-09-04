@@ -230,11 +230,19 @@ esp_err_t ota_init(void)
         store_available(NULL);
     }
 
-    esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "could not confirm running image: %s", esp_err_to_name(err));
-    }
     return ESP_OK;
+}
+
+esp_err_t ota_confirm_running_image(void)
+{
+    esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+    if (err == ESP_ERR_INVALID_STATE) {
+        return ESP_OK;
+    }
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "running firmware confirmed bootable");
+    }
+    return err;
 }
 
 esp_err_t ota_check_on_connect(void)

@@ -21,6 +21,7 @@ typedef struct {
 } ota_status_t;
 
 esp_err_t ota_init(void);
+esp_err_t ota_confirm_running_image(void);
 esp_err_t ota_check_on_connect(void);
 esp_err_t ota_start_update(void);
 void ota_get_status(ota_status_t *status);

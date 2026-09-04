@@ -464,4 +464,5 @@ void app_main(void)
         ESP_ERROR_CHECK(wifi_prov_start(WIFI_PROV_BOTH));
     }
     ESP_ERROR_CHECK(lcd_start_main_screen());
+    ESP_ERROR_CHECK(ota_confirm_running_image());
 }
