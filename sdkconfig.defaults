@@ -54,7 +54,7 @@ CONFIG_GEIGER_HISTORY_SHORT_WINDOW_S=300
 CONFIG_GEIGER_SIMULATE_TUBE_PULSES=y
 
 # Geiger Counter -> Firmware update
-CONFIG_GEIGER_OTA_URL=""
+CONFIG_GEIGER_OTA_URL="https://wp.laptopy.nl/geiger_counter_ota.bin"
 
 # Geiger Counter -> identity
 CONFIG_GEIGER_DEVICE_NAME="Geiger Counter"
