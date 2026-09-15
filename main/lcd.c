@@ -23,7 +23,7 @@ static TaskHandle_t s_display_task;
 
 #define LCD_AUTO_DIM_DELAY_US  (30LL * 1000000LL)
 #define LCD_MENU_ITEM_COUNT    9
-#define LCD_SYSTEM_FIELD_COUNT 5
+#define LCD_SYSTEM_FIELD_COUNT 6
 
 typedef enum {
     LCD_SCREEN_MAIN,
@@ -359,7 +359,7 @@ static void draw_system_screen(void)
     u8g2_t *display = board_lcd();
     char text[24];
     const int row_y[] = { 24, 35, 46, 57 };
-    const uint8_t first_field = s_system_field < 4 ? 0 : 1;
+    const uint8_t first_field = s_system_field < 4 ? 0 : s_system_field - 3;
 
     if (display == NULL) {
         return;
@@ -380,9 +380,12 @@ static void draw_system_screen(void)
             snprintf(text, sizeof(text), "BRIGHTNESS: %u %%", s_system_settings.lcd_brightness);
         } else if (field == 3) {
             snprintf(text, sizeof(text), "AUTO DIM:   %s", s_system_settings.lcd_auto_dim ? "ON" : "OFF");
-        } else {
+        } else if (field == 4) {
             snprintf(text, sizeof(text), "POWER SAVE: %s",
                      s_system_settings.power_save_mode ? "ON" : "OFF");
+        } else {
+            snprintf(text, sizeof(text), "CHARGING:   %s",
+                     s_system_settings.batt_charge_en ? "ON" : "OFF");
         }
         u8g2_DrawStr(display, 7, row_y[row], text);
     }
@@ -679,8 +682,10 @@ static void system_adjust(int direction)
         lcd_set_backlight(s_system_settings.lcd_brightness);
     } else if (s_system_field == 3) {
         s_system_settings.lcd_auto_dim = !s_system_settings.lcd_auto_dim;
-    } else {
+    } else if (s_system_field == 4) {
         s_system_settings.power_save_mode = !s_system_settings.power_save_mode;
+    } else {
+        s_system_settings.batt_charge_en = !s_system_settings.batt_charge_en;
     }
 }
 
@@ -817,6 +822,7 @@ lcd_action_t lcd_handle_button(board_input_t input, bool pressed)
                 }
                 if (settings_save(&s_system_settings) == ESP_OK) {
                     lcd_set_backlight(settings_get()->lcd_brightness);
+                    board_apply_settings();
                 }
                 s_system_editing = false;
             } else {
