@@ -1112,7 +1112,7 @@ void lcd_clear(void)
     }
 }
 
-void lcd_draw_battery_status(lcd_battery_state_t state, uint8_t frame)
+void lcd_draw_battery_status(lcd_battery_state_t state, uint8_t frame, int voltage_mv)
 {
     u8g2_t *display = board_lcd();
 
@@ -1126,20 +1126,22 @@ void lcd_draw_battery_status(lcd_battery_state_t state, uint8_t frame)
     const int battery_h = 28;
     int segment_count = 0;
 
-    if (state == LCD_BATTERY_CHARGED) {
-        segment_count = 5;
-    } else if (state == LCD_BATTERY_CHARGING) {
+    if (state == LCD_BATTERY_CHARGING) {
         segment_count = (frame % 5) + 1;
+    } else if (state == LCD_BATTERY_IDLE) {
+        segment_count = (board_battery_percentage(voltage_mv) + 19) / 20;
     }
 
     u8g2_ClearBuffer(display);
     u8g2_SetFont(display, u8g2_font_6x10_tf);
     if (state == LCD_BATTERY_FAULT) {
         u8g2_DrawStr(display, 47, 10, "FAULT");
-    } else if (state == LCD_BATTERY_CHARGED) {
-        u8g2_DrawStr(display, 41, 10, "CHARGED");
-    } else {
+    } else if (state == LCD_BATTERY_CHARGING) {
         u8g2_DrawStr(display, 38, 10, "CHARGING");
+    } else if (state == LCD_BATTERY_USB) {
+        u8g2_DrawStr(display, 55, 10, "USB");
+    } else {
+        u8g2_DrawStr(display, 44, 10, "BATTERY");
     }
     u8g2_DrawFrame(display, battery_x, battery_y, battery_w, battery_h);
     u8g2_DrawBox(display, battery_x + battery_w, battery_y + 8, 4, battery_h - 16);
@@ -1147,8 +1149,16 @@ void lcd_draw_battery_status(lcd_battery_state_t state, uint8_t frame)
         u8g2_DrawBox(display, battery_x + 4 + segment * 10, battery_y + 4, 7, battery_h - 8);
     }
     if (state == LCD_BATTERY_FAULT) {
-        u8g2_SetFont(display, u8g2_font_logisoso24_tf);
-        u8g2_DrawStr(display, 56, 42, "?");
+        u8g2_DrawLine(display, battery_x + 5, battery_y + 4,
+                     battery_x + battery_w - 5, battery_y + battery_h - 4);
+        u8g2_DrawLine(display, battery_x + battery_w - 5, battery_y + 4,
+                     battery_x + 5, battery_y + battery_h - 4);
+    } else if (state == LCD_BATTERY_USB) {
+        u8g2_DrawBox(display, battery_x + 24, battery_y + 7, 8, 8);
+        u8g2_DrawLine(display, battery_x + 28, battery_y + 15,
+                     battery_x + 28, battery_y + 22);
+        u8g2_DrawLine(display, battery_x + 24, battery_y + 22,
+                     battery_x + 32, battery_y + 22);
     }
     u8g2_SetFont(display, u8g2_font_5x7_tf);
     u8g2_DrawStr(display, 17, 61, "HOLD ENTER TO START");

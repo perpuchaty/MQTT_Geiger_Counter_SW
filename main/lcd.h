@@ -8,12 +8,13 @@ extern "C" {
 
 void lcd_draw_startup_screen(void);
 typedef enum {
+	LCD_BATTERY_IDLE,
+	LCD_BATTERY_USB,
 	LCD_BATTERY_FAULT,
-	LCD_BATTERY_CHARGED,
 	LCD_BATTERY_CHARGING,
 } lcd_battery_state_t;
 
-void lcd_draw_battery_status(lcd_battery_state_t state, uint8_t frame);
+void lcd_draw_battery_status(lcd_battery_state_t state, uint8_t frame, int voltage_mv);
 void lcd_clear(void);
 esp_err_t lcd_backlight_init(void);
 void lcd_set_backlight(uint8_t brightness);

@@ -412,18 +412,20 @@ static void wait_for_power_on(void)
         }
 
         if (screen_visible && now_us >= next_frame_at_us) {
-            bool charging_high = board_input_level(BOARD_IN_CHRG);
-            bool standby_high = board_input_level(BOARD_IN_STBY);
+            const settings_t *cfg = settings_get();
+            int battery_voltage_mv = 0;
+            board_adc_get_mv(BOARD_ADC_VLATCH, &battery_voltage_mv);
             lcd_battery_state_t battery_state;
 
-            if (charging_high && standby_high) {
+            if (!cfg->batt_charge_en) {
+                battery_state = battery_voltage_mv > 4500 ? LCD_BATTERY_USB : LCD_BATTERY_IDLE;
+            } else if (board_input_level(BOARD_IN_CHRG) &&
+                       board_input_level(BOARD_IN_STBY)) {
                 battery_state = LCD_BATTERY_FAULT;
-            } else if (!standby_high) {
-                battery_state = LCD_BATTERY_CHARGED;
             } else {
                 battery_state = LCD_BATTERY_CHARGING;
             }
-            lcd_draw_battery_status(battery_state, animation_frame++);
+            lcd_draw_battery_status(battery_state, animation_frame++, battery_voltage_mv);
             next_frame_at_us = now_us + POWER_ON_FRAME_US;
         }
 
