@@ -39,6 +39,7 @@ typedef enum {
     LCD_SCREEN_LAMP_TEST,
     LCD_SCREEN_POWER_SAVE,
     LCD_SCREEN_SHUTDOWN,
+    LCD_SCREEN_DEEP_DISCHARGE,
     LCD_SCREEN_OFF,
 } lcd_screen_t;
 
@@ -626,6 +627,30 @@ static void draw_power_save_screen(void)
     u8g2_SendBuffer(display);
 }
 
+static void draw_deep_discharge_screen(void)
+{
+    u8g2_t *display = board_lcd();
+    const int battery_x = 27;
+    const int battery_y = 20;
+    const int battery_w = 70;
+    const int battery_h = 32;
+
+    if (display == NULL) {
+        return;
+    }
+
+    u8g2_ClearBuffer(display);
+    u8g2_SetFont(display, u8g2_font_6x10_tf);
+    u8g2_DrawStr(display, 25, 10, "BATTERY EMPTY");
+    u8g2_DrawFrame(display, battery_x, battery_y, battery_w, battery_h);
+    u8g2_DrawBox(display, battery_x + battery_w, battery_y + 9, 5, battery_h - 18);
+    u8g2_DrawLine(display, battery_x + 8, battery_y + 7,
+                 battery_x + battery_w - 8, battery_y + battery_h - 7);
+    u8g2_DrawLine(display, battery_x + battery_w - 8, battery_y + 7,
+                 battery_x + 8, battery_y + battery_h - 7);
+    u8g2_SendBuffer(display);
+}
+
 static void time_adjust(int direction)
 {
     if (s_time_field == 0) {
@@ -1059,6 +1084,9 @@ static void main_screen_task(void *arg)
         case LCD_SCREEN_SHUTDOWN:
             draw_shutdown_screen();
             break;
+        case LCD_SCREEN_DEEP_DISCHARGE:
+            draw_deep_discharge_screen();
+            break;
         case LCD_SCREEN_OFF:
             break;
         }
@@ -1100,6 +1128,19 @@ void lcd_draw_startup_screen(void)
     u8g2_SetFont(display, u8g2_font_5x7_tf);
     u8g2_DrawStr(display, 34, 61, "INITIALIZING");
     u8g2_SendBuffer(display);
+}
+
+void lcd_show_deep_discharge(void)
+{
+    s_screen = LCD_SCREEN_DEEP_DISCHARGE;
+    s_lamp_test_active = false;
+    lcd_set_backlight(0);
+
+    if (s_display_task != NULL) {
+        lcd_refresh();
+    } else {
+        draw_deep_discharge_screen();
+    }
 }
 
 void lcd_clear(void)

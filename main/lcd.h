@@ -29,6 +29,7 @@ typedef enum {
 lcd_action_t lcd_handle_button(board_input_t input, bool pressed);
 void lcd_request_shutdown_confirmation(void);
 void lcd_request_power_save_confirmation(void);
+void lcd_show_deep_discharge(void);
 void lcd_fade_out_and_clear(void);
 bool lcd_lamp_test_active(void);
 esp_err_t lcd_start_main_screen(void);

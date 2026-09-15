@@ -135,10 +135,54 @@ typedef struct {
 #define STANDBY_CLEAR_US (3LL * 1000 * 1000)
 #define POWER_ON_POLL_MS 20
 #define POWER_ON_FRAME_US (200LL * 1000)
+#define BATTERY_CUTOFF_MV 3300
+#define BATTERY_CHECK_MS 1000
+#define BATTERY_LOW_CONFIRMATIONS 5
 
 static QueueHandle_t s_button_events;
 static esp_timer_handle_t s_power_off_timer;
 static esp_timer_handle_t s_power_save_timer;
+
+static void deep_discharge_power_off(int battery_voltage_mv)
+{
+    ESP_LOGW(TAG, "Battery critically low at %d mV; switching off", battery_voltage_mv);
+    board_hv_set_enabled(false);
+    board_buzzer_off();
+    board_set_led(false);
+    lcd_show_deep_discharge();
+    vTaskDelay(pdMS_TO_TICKS(100));
+    board_set_latch(false);
+
+    for (;;) {
+        vTaskDelay(portMAX_DELAY);
+    }
+}
+
+static void battery_protection_task(void *arg)
+{
+    unsigned low_readings = 0;
+
+    for (;;) {
+        int battery_voltage_mv;
+        if (board_adc_get_mv(BOARD_ADC_VLATCH, &battery_voltage_mv) == ESP_OK &&
+            battery_voltage_mv <= BATTERY_CUTOFF_MV) {
+            low_readings++;
+            if (low_readings >= BATTERY_LOW_CONFIRMATIONS) {
+                deep_discharge_power_off(battery_voltage_mv);
+            }
+        } else {
+            low_readings = 0;
+        }
+        vTaskDelay(pdMS_TO_TICKS(BATTERY_CHECK_MS));
+    }
+}
+
+static esp_err_t battery_protection_start(void)
+{
+    return xTaskCreate(battery_protection_task, "battery", 2048, NULL, 5, NULL) == pdPASS
+               ? ESP_OK
+               : ESP_ERR_NO_MEM;
+}
 
 static void power_off_timer_cb(void *arg)
 {
@@ -444,6 +488,11 @@ void app_main(void)
     ESP_ERROR_CHECK(board_init());
     board_apply_settings();
     ESP_ERROR_CHECK(lcd_backlight_init());
+    int battery_voltage_mv;
+    if (board_adc_get_mv(BOARD_ADC_VLATCH, &battery_voltage_mv) == ESP_OK &&
+        battery_voltage_mv <= BATTERY_CUTOFF_MV) {
+        deep_discharge_power_off(battery_voltage_mv);
+    }
     //wait_for_power_on();
     lcd_draw_startup_screen();
 
@@ -466,5 +515,6 @@ void app_main(void)
         ESP_ERROR_CHECK(wifi_prov_start(WIFI_PROV_BOTH));
     }
     ESP_ERROR_CHECK(lcd_start_main_screen());
+    ESP_ERROR_CHECK(battery_protection_start());
     ESP_ERROR_CHECK(ota_confirm_running_image());
 }
