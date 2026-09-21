@@ -84,7 +84,7 @@ static void tube_pulse_isr(board_input_t input, bool level, void *arg)
 static void tube_tick_task(void *arg)
 {
     for (;;) {
-        uint32_t pulses = ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         tube_pulse_feedback();
     }
 }
@@ -135,6 +135,7 @@ typedef struct {
 #define STANDBY_CLEAR_US (3LL * 1000 * 1000)
 #define POWER_ON_POLL_MS 20
 #define POWER_ON_FRAME_US (200LL * 1000)
+#define STARTUP_SPLASH_MS 2500
 #define BATTERY_CUTOFF_MV 3300
 #define BATTERY_CHECK_MS 1000
 #define BATTERY_LOW_CONFIRMATIONS 5
@@ -460,14 +461,25 @@ static void wait_for_power_on(void)
             int battery_voltage_mv = 0;
             board_adc_get_mv(BOARD_ADC_VLATCH, &battery_voltage_mv);
             lcd_battery_state_t battery_state;
+            bool chrg_level = board_input_level(BOARD_IN_CHRG);
+            bool stby_level = board_input_level(BOARD_IN_STBY);
+            bool charger_fault = chrg_level && stby_level;
+            bool charging_active = !chrg_level && stby_level;
 
             if (!cfg->batt_charge_en) {
                 battery_state = battery_voltage_mv > 4500 ? LCD_BATTERY_USB : LCD_BATTERY_IDLE;
-            } else if (board_input_level(BOARD_IN_CHRG) &&
-                       board_input_level(BOARD_IN_STBY)) {
-                battery_state = LCD_BATTERY_FAULT;
             } else {
-                battery_state = LCD_BATTERY_CHARGING;
+                if (battery_voltage_mv > 4300) {
+                    if (charger_fault) {
+                        battery_state = LCD_BATTERY_FAULT;
+                    } else if (charging_active) {
+                        battery_state = LCD_BATTERY_CHARGING;
+                    } else {
+                        battery_state = LCD_BATTERY_IDLE;
+                    }
+                } else {
+                    battery_state = LCD_BATTERY_IDLE;
+                }
             }
             lcd_draw_battery_status(battery_state, animation_frame++, battery_voltage_mv);
             next_frame_at_us = now_us + POWER_ON_FRAME_US;
@@ -495,6 +507,7 @@ void app_main(void)
     }
     //wait_for_power_on();
     lcd_draw_startup_screen();
+    vTaskDelay(pdMS_TO_TICKS(STARTUP_SPLASH_MS));
 
     ESP_ERROR_CHECK(board_hv_set_freq(PWM_TUBE_FREQ_HZ));
     ESP_ERROR_CHECK(board_hv_set_duty(PWM_TUBE_STARTUP_DUTY_PCT));

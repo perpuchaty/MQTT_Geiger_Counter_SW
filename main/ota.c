@@ -11,6 +11,7 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
+#include "config.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -23,6 +24,7 @@ static const char *TAG = "ota";
 
 static SemaphoreHandle_t s_lock;
 static ota_status_t s_status;
+static bool s_hv_restore_on_fail;
 
 static void status_lock(void)
 {
@@ -167,6 +169,7 @@ static void check_task(void *arg)
 
 static void update_task(void *arg)
 {
+    bool restore_hv = s_hv_restore_on_fail;
     esp_https_ota_handle_t handle = NULL;
     esp_app_desc_t candidate = {0};
     esp_err_t err = open_image(&handle, &candidate);
@@ -207,6 +210,12 @@ static void update_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(500));
         esp_restart();
     } else {
+        if (restore_hv) {
+            esp_err_t hv_err = board_hv_set_enabled(true);
+            if (hv_err != ESP_OK) {
+                ESP_LOGW(TAG, "cannot restore HV after failed update: %s", esp_err_to_name(hv_err));
+            }
+        }
         ESP_LOGE(TAG, "update failed: %s", esp_err_to_name(err));
     }
     vTaskDelete(NULL);
@@ -279,6 +288,17 @@ esp_err_t ota_start_update(void)
         status_unlock();
         return ESP_ERR_INVALID_STATE;
     }
+
+    bool hv_was_enabled = board_hv_is_enabled();
+    if (hv_was_enabled) {
+        esp_err_t hv_err = board_hv_set_enabled(false);
+        if (hv_err != ESP_OK) {
+            status_unlock();
+            return hv_err;
+        }
+    }
+
+    s_hv_restore_on_fail = hv_was_enabled;
     s_status.updating = true;
     s_status.progress_pct = 0;
     s_status.last_error = ESP_OK;
@@ -288,6 +308,10 @@ esp_err_t ota_start_update(void)
         status_lock();
         s_status.updating = false;
         s_status.last_error = ESP_ERR_NO_MEM;
+        if (s_hv_restore_on_fail) {
+            board_hv_set_enabled(true);
+            s_hv_restore_on_fail = false;
+        }
         status_unlock();
         return ESP_ERR_NO_MEM;
     }

@@ -135,8 +135,10 @@ static void draw_battery_icon(u8g2_t *display, int x, int y)
 {
     const int width = 19;
     const int height = 10;
-    bool charger_fault = board_input_level(BOARD_IN_CHRG) &&
-                         board_input_level(BOARD_IN_STBY);
+    bool chrg_level = board_input_level(BOARD_IN_CHRG);
+    bool stby_level = board_input_level(BOARD_IN_STBY);
+    bool charger_fault = chrg_level && stby_level;
+    bool charging_active = !chrg_level && stby_level;
 
     u8g2_DrawFrame(display, x, y, width - 2, height);
     u8g2_DrawBox(display, x + width - 2, y + 3, 2, height - 6);
@@ -153,6 +155,14 @@ static void draw_battery_icon(u8g2_t *display, int x, int y)
     uint8_t bars = (board_battery_percentage(voltage_mv) + 24) / 25;
     for (uint8_t bar = 0; bar < bars; bar++) {
         u8g2_DrawBox(display, x + 2 + bar * 4, y + 2, 3, height - 4);
+    }
+
+    if (settings_get()->batt_charge_en && voltage_mv > 4300 && charging_active) {
+        /* Charging glyph: small lightning bolt overlay. */
+        u8g2_DrawLine(display, x + 9, y + 2, x + 7, y + 5);
+        u8g2_DrawLine(display, x + 7, y + 5, x + 10, y + 5);
+        u8g2_DrawLine(display, x + 10, y + 5, x + 8, y + 8);
+        u8g2_DrawLine(display, x + 8, y + 8, x + 11, y + 8);
     }
 }
 
@@ -972,6 +982,7 @@ lcd_action_t lcd_handle_button(board_input_t input, bool pressed)
         break;
     case LCD_SCREEN_POWER_SAVE:
     case LCD_SCREEN_SHUTDOWN:
+    case LCD_SCREEN_DEEP_DISCHARGE:
     case LCD_SCREEN_OFF:
         break;
     }
@@ -1118,12 +1129,15 @@ void lcd_draw_startup_screen(void)
     u8g2_DrawHLine(display, 16, 14, LCD_WIDTH - 32);
 
     const int icon_x = LCD_WIDTH / 2;
-    const int icon_y = 32;
+    const int icon_y = 33;
     u8g2_DrawCircle(display, icon_x, icon_y, 16, U8G2_DRAW_ALL);
+    u8g2_DrawDisc(display, icon_x, icon_y - 9, 5, U8G2_DRAW_ALL);
+    u8g2_DrawDisc(display, icon_x - 8, icon_y + 5, 5, U8G2_DRAW_ALL);
+    u8g2_DrawDisc(display, icon_x + 8, icon_y + 5, 5, U8G2_DRAW_ALL);
+    u8g2_SetDrawColor(display, 0);
     u8g2_DrawDisc(display, icon_x, icon_y, 4, U8G2_DRAW_ALL);
-    u8g2_DrawDisc(display, icon_x, icon_y - 10, 4, U8G2_DRAW_ALL);
-    u8g2_DrawDisc(display, icon_x - 9, icon_y + 5, 4, U8G2_DRAW_ALL);
-    u8g2_DrawDisc(display, icon_x + 9, icon_y + 5, 4, U8G2_DRAW_ALL);
+    u8g2_SetDrawColor(display, 1);
+    u8g2_DrawDisc(display, icon_x, icon_y, 2, U8G2_DRAW_ALL);
 
     u8g2_SetFont(display, u8g2_font_5x7_tf);
     u8g2_DrawStr(display, 34, 61, "INITIALIZING");

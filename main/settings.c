@@ -89,6 +89,7 @@ static void settings_defaults(settings_t *c)
     c->spk_volume     = CONFIG_GEIGER_SPK_VOLUME;
     c->spk_sound      = CONFIG_GEIGER_SPK_SOUND;
     c->lcd_brightness = CONFIG_GEIGER_LCD_BRIGHTNESS;
+    c->hv_start_enabled = true;
     c->history_short_window_s = CONFIG_GEIGER_HISTORY_SHORT_WINDOW_S;
 #ifdef CONFIG_GEIGER_LCD_AUTO_DIM
     c->lcd_auto_dim = true;

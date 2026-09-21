@@ -27,7 +27,8 @@ build/
 # ESP-IDF specific build outputs
 *.bin
 !ota/
-!ota/geiger_counter_ota.bin
+!ota/*.bin
+!ota/README.md
 *.elf
 *.map
 flasher_args.json # Generated in build directory

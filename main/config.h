@@ -59,7 +59,7 @@ extern "C" {
  * PWM (LEDC). ESP32-C6 only implements the low speed mode.
  * ---------------------------------------------------------------------- */
 #define PWM_SPEED_MODE          LEDC_LOW_SPEED_MODE
-#define PWM_CLK_SRC             LEDC_USE_PLL_DIV_CLK
+#define PWM_CLK_SRC             LEDC_SLOW_CLK_RC_FAST
 
 /* Geiger tube HV boost converter */
 #define PWM_TUBE_TIMER          LEDC_TIMER_0
