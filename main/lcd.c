@@ -20,6 +20,7 @@ static volatile uint8_t s_backlight_current;
 static volatile int64_t s_last_activity_us;
 static volatile bool s_display_busy;
 static TaskHandle_t s_display_task;
+static uint8_t s_battery_animation_frame;
 
 #define LCD_AUTO_DIM_DELAY_US  (30LL * 1000000LL)
 #define LCD_MENU_ITEM_COUNT    9
@@ -148,6 +149,14 @@ static void draw_battery_icon(u8g2_t *display, int x, int y)
         return;
     }
 
+    if (settings_get()->batt_charge_en && charging_active) {
+        uint8_t bars = (s_battery_animation_frame++ % 4) + 1;
+        for (uint8_t bar = 0; bar < bars; bar++) {
+            u8g2_DrawBox(display, x + 2 + bar * 4, y + 2, 3, height - 4);
+        }
+        return;
+    }
+
     int voltage_mv;
     if (board_adc_get_mv(BOARD_ADC_VLATCH, &voltage_mv) != ESP_OK) {
         return;
@@ -155,14 +164,6 @@ static void draw_battery_icon(u8g2_t *display, int x, int y)
     uint8_t bars = (board_battery_percentage(voltage_mv) + 24) / 25;
     for (uint8_t bar = 0; bar < bars; bar++) {
         u8g2_DrawBox(display, x + 2 + bar * 4, y + 2, 3, height - 4);
-    }
-
-    if (settings_get()->batt_charge_en && voltage_mv > 4300 && charging_active) {
-        /* Charging glyph: small lightning bolt overlay. */
-        u8g2_DrawLine(display, x + 9, y + 2, x + 7, y + 5);
-        u8g2_DrawLine(display, x + 7, y + 5, x + 10, y + 5);
-        u8g2_DrawLine(display, x + 10, y + 5, x + 8, y + 8);
-        u8g2_DrawLine(display, x + 8, y + 8, x + 11, y + 8);
     }
 }
 
