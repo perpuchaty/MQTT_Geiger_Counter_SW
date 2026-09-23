@@ -7,6 +7,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "history_store.h"
+#include "lcd.h"
 
 static const char *TAG = "geiger";
 
@@ -55,6 +56,7 @@ static void geiger_task(void *arg)
         }
         /* Scale the window, however long and however full, up to a full minute. */
         s_cpm = sum * 60 / s_filled;
+        lcd_refresh_measurements();
 
         time_t now = time(NULL);
         if (now <= 0) {

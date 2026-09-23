@@ -1,6 +1,8 @@
 #include "config.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_pm.h"
+#include "esp_random.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -82,9 +84,7 @@ static void tube_pulse_isr(board_input_t input, bool level, void *arg)
 static void tube_tick_task(void *arg)
 {
     for (;;) {
-        uint32_t pulses = ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        ESP_LOGI(TAG, "Tube tick detected (%lu pulse%s)", (unsigned long)pulses,
-                 pulses == 1 ? "" : "s");
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         tube_pulse_feedback();
     }
 }
@@ -103,19 +103,87 @@ static esp_err_t tube_tick_init(void)
     return board_input_set_isr(BOARD_IN_TUBE_CNT, tube_pulse_isr, NULL);
 }
 
+#if CONFIG_GEIGER_SIMULATE_TUBE_PULSES
+static void tube_simulation_task(void *arg)
+{
+    ESP_LOGW(TAG, "Tube pulse simulation enabled");
+    for (;;) {
+        uint32_t delay_ms = 250 + esp_random() % 2751;
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        board_simulate_tube_pulse();
+        xTaskNotifyGive(s_tube_tick_task);
+    }
+}
+
+static esp_err_t tube_simulation_start(void)
+{
+    return xTaskCreate(tube_simulation_task, "tube_sim", 2048, NULL, 3, NULL) == pdPASS
+               ? ESP_OK
+               : ESP_ERR_NO_MEM;
+}
+#endif
+
 typedef struct {
     board_input_t input;
     bool          level;
 } button_event_t;
 
 #define POWER_OFF_HOLD_US (3ULL * 1000 * 1000)
+#define POWER_SAVE_HOLD_US (3ULL * 1000 * 1000)
 #define POWER_ON_HOLD_US  (3LL * 1000 * 1000)
 #define STANDBY_BACKLIGHT_US (3LL * 1000 * 1000)
+#define STANDBY_CLEAR_US (3LL * 1000 * 1000)
 #define POWER_ON_POLL_MS 20
 #define POWER_ON_FRAME_US (200LL * 1000)
+#define STARTUP_SPLASH_MS 2500
+#define BATTERY_CUTOFF_MV 3300
+#define BATTERY_CHECK_MS 1000
+#define BATTERY_LOW_CONFIRMATIONS 5
 
 static QueueHandle_t s_button_events;
 static esp_timer_handle_t s_power_off_timer;
+static esp_timer_handle_t s_power_save_timer;
+
+static void deep_discharge_power_off(int battery_voltage_mv)
+{
+    ESP_LOGW(TAG, "Battery critically low at %d mV; switching off", battery_voltage_mv);
+    board_hv_set_enabled(false);
+    board_buzzer_off();
+    board_set_led(false);
+    lcd_show_deep_discharge();
+    vTaskDelay(pdMS_TO_TICKS(100));
+    board_set_latch(false);
+
+    for (;;) {
+        vTaskDelay(portMAX_DELAY);
+    }
+}
+
+static void battery_protection_task(void *arg)
+{
+    unsigned low_readings = 0;
+
+    for (;;) {
+        int battery_voltage_mv;
+        if (board_adc_get_mv(BOARD_ADC_VLATCH, &battery_voltage_mv) == ESP_OK &&
+            battery_voltage_mv <= BATTERY_CUTOFF_MV) {
+            low_readings++;
+            if (low_readings >= BATTERY_LOW_CONFIRMATIONS) {
+                deep_discharge_power_off(battery_voltage_mv);
+            }
+        } else {
+            low_readings = 0;
+        }
+        vTaskDelay(pdMS_TO_TICKS(BATTERY_CHECK_MS));
+    }
+}
+
+static esp_err_t battery_protection_start(void)
+{
+    return xTaskCreate(battery_protection_task, "battery", 2048, NULL, 5, NULL) == pdPASS
+               ? ESP_OK
+               : ESP_ERR_NO_MEM;
+}
 
 static void power_off_timer_cb(void *arg)
 {
@@ -125,9 +193,21 @@ static void power_off_timer_cb(void *arg)
     }
 }
 
+static void power_save_timer_cb(void *arg)
+{
+    if (!board_input_level(BOARD_IN_BTN_RIGHT)) {
+        ESP_LOGI(TAG, "Right held for 3 seconds, requesting power-save confirmation");
+        lcd_request_power_save_confirmation();
+    }
+}
+
 static void power_off(void)
 {
     ESP_LOGI(TAG, "Shutdown confirmed");
+    esp_err_t hv_err = board_hv_set_enabled(false);
+    if (hv_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to disable high voltage: %s", esp_err_to_name(hv_err));
+    }
     board_buzzer_off();
     lcd_fade_out_and_clear();
     board_set_latch(false);
@@ -135,17 +215,55 @@ static void power_off(void)
     esp_restart();
 }
 
-static void power_off_hold_update(const button_event_t *event)
+static void button_hold_update(const button_event_t *event)
 {
-    if (event->input != BOARD_IN_BTN_ENTER) {
+    esp_timer_handle_t timer;
+
+    if (event->input == BOARD_IN_BTN_ENTER) {
+        timer = s_power_off_timer;
+    } else if (event->input == BOARD_IN_BTN_RIGHT) {
+        timer = s_power_save_timer;
+    } else {
         return;
     }
 
-    if (esp_timer_is_active(s_power_off_timer)) {
-        esp_timer_stop(s_power_off_timer);
+    if (esp_timer_is_active(timer)) {
+        esp_timer_stop(timer);
     }
     if (!event->level) {
-        esp_timer_start_once(s_power_off_timer, POWER_OFF_HOLD_US);
+        esp_timer_start_once(timer, event->input == BOARD_IN_BTN_ENTER
+                                        ? POWER_OFF_HOLD_US : POWER_SAVE_HOLD_US);
+    }
+}
+
+static esp_err_t apply_power_save_mode(bool enabled)
+{
+    ESP_RETURN_ON_ERROR(wifi_radio_set_enabled(!enabled), TAG, "set radio state");
+    if (!enabled && !wifi_has_credentials()) {
+        ESP_RETURN_ON_ERROR(wifi_prov_start(WIFI_PROV_BOTH), TAG, "start provisioning");
+    }
+    return ESP_OK;
+}
+
+static void set_power_save_mode(bool enabled)
+{
+    bool previous = settings_get()->power_save_mode;
+    if (enabled == previous) {
+        return;
+    }
+
+    esp_err_t err = apply_power_save_mode(enabled);
+    if (err == ESP_OK) {
+        settings_t updated = *settings_get();
+        updated.power_save_mode = enabled;
+        err = settings_save(&updated);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to %s power save: %s", enabled ? "enable" : "disable",
+                 esp_err_to_name(err));
+        apply_power_save_mode(previous);
+    } else {
+        ESP_LOGI(TAG, "Power save %s", enabled ? "enabled" : "disabled");
     }
 }
 
@@ -197,15 +315,20 @@ static void button_event_task(void *arg)
         xQueueReceive(s_button_events, &event, portMAX_DELAY);
         ESP_LOGI(TAG, "button %s %s", button_name(event.input),
                  event.level ? "released" : "pressed");
-        power_off_hold_update(&event);
+        button_hold_update(&event);
 
         bool lamp_test_was_active = lcd_lamp_test_active();
-        bool shutdown_confirmed = lcd_handle_button(event.input, !event.level);
+        lcd_action_t action = lcd_handle_button(event.input, !event.level);
         bool lamp_test_is_active = lcd_lamp_test_active();
 
-        if (shutdown_confirmed) {
+        if (action == LCD_ACTION_SHUTDOWN) {
             power_off();
+        } else if (action == LCD_ACTION_POWER_SAVE_ENABLE) {
+            set_power_save_mode(true);
+        } else if (action == LCD_ACTION_POWER_SAVE_DISABLE) {
+            set_power_save_mode(false);
         }
+        lcd_refresh();
 
         if (lamp_test_is_active) {
             if (esp_timer_is_active(s_tick_stop_timer)) {
@@ -226,9 +349,15 @@ static esp_err_t button_events_init(void)
         .callback = power_off_timer_cb,
         .name = "power_off_hold",
     };
+    const esp_timer_create_args_t power_save_timer_args = {
+        .callback = power_save_timer_cb,
+        .name = "power_save_hold",
+    };
 
     ESP_RETURN_ON_ERROR(esp_timer_create(&power_off_timer_args, &s_power_off_timer),
                         TAG, "power off timer");
+    ESP_RETURN_ON_ERROR(esp_timer_create(&power_save_timer_args, &s_power_save_timer),
+                        TAG, "power save timer");
     s_button_events = xQueueCreate(16, sizeof(button_event_t));
     ESP_RETURN_ON_FALSE(s_button_events, ESP_ERR_NO_MEM, TAG, "button event queue");
     ESP_RETURN_ON_FALSE(xTaskCreate(button_event_task, "buttons", 2048, NULL, 5, NULL) == pdPASS,
@@ -250,28 +379,58 @@ static void nvs_bringup(void)
     ESP_ERROR_CHECK(err);
 }
 
+static void power_management_init(void)
+{
+    const esp_pm_config_t config = {
+        .max_freq_mhz = 160,
+        .min_freq_mhz = 40,
+        .light_sleep_enable = true,
+    };
+
+    ESP_ERROR_CHECK(esp_pm_configure(&config));
+    ESP_LOGI(TAG, "Power management enabled: CPU 40-160 MHz, automatic light sleep");
+}
+
 static void wait_for_power_on(void)
 {
-    if (!board_input_level(BOARD_IN_BTN_ENTER)) {
-        ESP_LOGI(TAG, "Enter held at startup, continuing");
-        return;
-    }
-
     ESP_LOGI(TAG, "Waiting for a 3 second Enter hold");
     int64_t pressed_since_us = 0;
     int64_t backlight_off_at_us = esp_timer_get_time() + STANDBY_BACKLIGHT_US;
+    int64_t clear_at_us = backlight_off_at_us + STANDBY_CLEAR_US;
     int64_t next_frame_at_us = 0;
     uint8_t animation_frame = 0;
+    uint8_t breath_phase = 0;
+    uint8_t breath_accumulator = 0;
     bool backlight_on = true;
+    bool screen_visible = true;
     bool enter_was_pressed = false;
 
     for (;;) {
         int64_t now_us = esp_timer_get_time();
         bool enter_pressed = !board_input_level(BOARD_IN_BTN_ENTER);
 
+        uint8_t breath_level = breath_phase <= 100 ? breath_phase : 200 - breath_phase;
+        breath_accumulator += breath_level;
+        board_set_led(breath_accumulator >= 100);
+        if (breath_accumulator >= 100) {
+            breath_accumulator -= 100;
+        }
+        breath_phase = breath_phase == 199 ? 0 : breath_phase + 1;
+
         if (enter_pressed != enter_was_pressed) {
             ESP_LOGI(TAG, "Startup Enter %s", enter_pressed ? "pressed" : "released");
             enter_was_pressed = enter_pressed;
+            if (enter_pressed) {
+                lcd_wake_backlight();
+                backlight_on = true;
+                screen_visible = true;
+                next_frame_at_us = 0;
+                backlight_off_at_us = now_us + STANDBY_BACKLIGHT_US;
+                clear_at_us = backlight_off_at_us + STANDBY_CLEAR_US;
+            } else {
+                backlight_off_at_us = now_us + STANDBY_BACKLIGHT_US;
+                clear_at_us = backlight_off_at_us + STANDBY_CLEAR_US;
+            }
         }
 
         if (enter_pressed) {
@@ -279,6 +438,7 @@ static void wait_for_power_on(void)
                 pressed_since_us = now_us;
             } else if (now_us - pressed_since_us >= POWER_ON_HOLD_US) {
                 ESP_LOGI(TAG, "Enter held for 3 seconds, continuing startup");
+                board_set_led(false);
                 lcd_set_backlight(settings_get()->lcd_brightness);
                 return;
             }
@@ -286,24 +446,42 @@ static void wait_for_power_on(void)
             pressed_since_us = 0;
         }
 
-        if (backlight_on && now_us >= backlight_off_at_us) {
+        if (backlight_on && !enter_pressed && now_us >= backlight_off_at_us) {
             lcd_set_backlight(0);
             backlight_on = false;
         }
 
-        if (now_us >= next_frame_at_us) {
-            bool charging_high = board_input_level(BOARD_IN_CHRG);
-            bool standby_high = board_input_level(BOARD_IN_STBY);
-            lcd_battery_state_t battery_state;
+        if (screen_visible && !enter_pressed && now_us >= clear_at_us) {
+            lcd_clear();
+            screen_visible = false;
+        }
 
-            if (charging_high && standby_high) {
-                battery_state = LCD_BATTERY_FAULT;
-            } else if (!standby_high) {
-                battery_state = LCD_BATTERY_CHARGED;
+        if (screen_visible && now_us >= next_frame_at_us) {
+            const settings_t *cfg = settings_get();
+            int battery_voltage_mv = 0;
+            board_adc_get_mv(BOARD_ADC_VLATCH, &battery_voltage_mv);
+            lcd_battery_state_t battery_state;
+            bool chrg_level = board_input_level(BOARD_IN_CHRG);
+            bool stby_level = board_input_level(BOARD_IN_STBY);
+            bool charger_fault = chrg_level && stby_level;
+            bool charging_active = !chrg_level && stby_level;
+
+            if (!cfg->batt_charge_en) {
+                battery_state = battery_voltage_mv > 4500 ? LCD_BATTERY_USB : LCD_BATTERY_IDLE;
             } else {
-                battery_state = LCD_BATTERY_CHARGING;
+                if (battery_voltage_mv > 4300) {
+                    if (charger_fault) {
+                        battery_state = LCD_BATTERY_FAULT;
+                    } else if (charging_active) {
+                        battery_state = LCD_BATTERY_CHARGING;
+                    } else {
+                        battery_state = LCD_BATTERY_IDLE;
+                    }
+                } else {
+                    battery_state = LCD_BATTERY_IDLE;
+                }
             }
-            lcd_draw_battery_status(battery_state, animation_frame++);
+            lcd_draw_battery_status(battery_state, animation_frame++, battery_voltage_mv);
             next_frame_at_us = now_us + POWER_ON_FRAME_US;
         }
 
@@ -313,6 +491,7 @@ static void wait_for_power_on(void)
 
 void app_main(void)
 {
+    power_management_init();
     nvs_bringup();
     ESP_ERROR_CHECK(settings_init());   /* everything below reads settings_get() */
     ESP_ERROR_CHECK(history_store_init());
@@ -321,26 +500,34 @@ void app_main(void)
     ESP_ERROR_CHECK(board_init());
     board_apply_settings();
     ESP_ERROR_CHECK(lcd_backlight_init());
-    wait_for_power_on();
+    int battery_voltage_mv;
+    if (board_adc_get_mv(BOARD_ADC_VLATCH, &battery_voltage_mv) == ESP_OK &&
+        battery_voltage_mv <= BATTERY_CUTOFF_MV) {
+        deep_discharge_power_off(battery_voltage_mv);
+    }
+    //wait_for_power_on();
     lcd_draw_startup_screen();
+    vTaskDelay(pdMS_TO_TICKS(STARTUP_SPLASH_MS));
 
     ESP_ERROR_CHECK(board_hv_set_freq(PWM_TUBE_FREQ_HZ));
     ESP_ERROR_CHECK(board_hv_set_duty(PWM_TUBE_STARTUP_DUTY_PCT));
     ESP_ERROR_CHECK(board_hv_set_enabled(settings_get()->hv_start_enabled));
     ESP_ERROR_CHECK(board_hv_regulator_start());
     ESP_ERROR_CHECK(tube_tick_init());
+#if CONFIG_GEIGER_SIMULATE_TUBE_PULSES
+    ESP_ERROR_CHECK(tube_simulation_start());
+#endif
     ESP_ERROR_CHECK(button_events_init());
     ESP_ERROR_CHECK(geiger_start());
     ESP_ERROR_CHECK(wifi_prov_init());
+    ESP_ERROR_CHECK(apply_power_save_mode(settings_get()->power_save_mode));
     ESP_ERROR_CHECK(mqtt_init());
 
-    wifi_prov_method_t provisioning = WIFI_PROV_BLUFI;
-    if (!wifi_has_credentials()) {
-        provisioning |= WIFI_PROV_SOFTAP;
-        ESP_LOGI(TAG, "provisioning: BluFi over BLE, or join \"%s\"", wifi_softap_ssid());
-    } else {
-        ESP_LOGI(TAG, "BluFi ready for Wi-Fi reconfiguration");
+    if (!settings_get()->power_save_mode && !wifi_has_credentials()) {
+        ESP_LOGI(TAG, "provisioning: BluFi or join \"%s\"", wifi_softap_ssid());
+        ESP_ERROR_CHECK(wifi_prov_start(WIFI_PROV_BOTH));
     }
-    ESP_ERROR_CHECK(wifi_prov_start(provisioning));
     ESP_ERROR_CHECK(lcd_start_main_screen());
+    ESP_ERROR_CHECK(battery_protection_start());
+    ESP_ERROR_CHECK(ota_confirm_running_image());
 }

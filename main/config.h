@@ -6,7 +6,7 @@
 #include "driver/gpio.h"
 #include "driver/ledc.h"
 #include "driver/spi_master.h"
-#include "esp_adc/adc_continuous.h"
+#include "esp_adc/adc_oneshot.h"
 #include "esp_err.h"
 #include "u8g2.h"
 
@@ -59,7 +59,7 @@ extern "C" {
  * PWM (LEDC). ESP32-C6 only implements the low speed mode.
  * ---------------------------------------------------------------------- */
 #define PWM_SPEED_MODE          LEDC_LOW_SPEED_MODE
-#define PWM_CLK_SRC             LEDC_USE_PLL_DIV_CLK
+#define PWM_CLK_SRC             LEDC_SLOW_CLK_RC_FAST
 
 /* Geiger tube HV boost converter */
 #define PWM_TUBE_TIMER          LEDC_TIMER_0
@@ -88,13 +88,13 @@ extern "C" {
 #define BUZZER_CLICK_LONG_MS     50
 
 /* -------------------------------------------------------------------------
- * ADC - continuous (DMA) mode with hardware calibration
+ * ADC - periodic one-shot bursts with hardware calibration
  * ---------------------------------------------------------------------- */
 #define BOARD_ADC_ATTEN         ADC_ATTEN_DB_12    /* full ~0..3.1 V input range */
-#define BOARD_ADC_SAMPLE_HZ     20000
-#define BOARD_ADC_FRAME_BYTES   256                /* must be a multiple of 4 */
-#define BOARD_ADC_POOL_BYTES    1024
-#define BOARD_ADC_IIR_SHIFT     5                  /* averaging time constant: 32 samples/channel */
+#define BOARD_ADC_BURST_SAMPLES 32
+#define BOARD_ADC_INTERVAL_MS   500
+#define VLATCH_DIVIDER_NUMERATOR   2
+#define VLATCH_DIVIDER_DENOMINATOR 1
 #define TUBE_DIVIDER_TOP_OHM    80000000UL
 #define TUBE_DIVIDER_BOTTOM_OHM 510000UL
 
@@ -151,6 +151,8 @@ bool board_input_level(board_input_t in);
 esp_err_t board_input_set_isr(board_input_t in, board_input_isr_t cb, void *arg);
 /** Free running tube pulse counter, incremented by the PIN_TUBE_CNT ISR. */
 uint32_t board_tube_pulses(void);
+/** Injects one pulse into the counter for bench simulation. */
+void board_simulate_tube_pulse(void);
 
 /* PWM */
 esp_err_t board_hv_set_duty(float duty_pct);
@@ -166,10 +168,11 @@ esp_err_t board_backlight_set(uint8_t duty_pct);
 esp_err_t board_buzzer_on(uint32_t freq_hz, uint8_t duty_level);
 esp_err_t board_buzzer_off(void);
 
-/* ADC, values are refreshed continuously in the background */
+/* ADC, values are refreshed periodically in the background */
 esp_err_t board_adc_get_raw(board_adc_ch_t ch, int *raw);
 esp_err_t board_adc_get_mv(board_adc_ch_t ch, int *mv);
 esp_err_t board_tube_voltage_get_mv(int *mv);
+uint8_t board_battery_percentage(int voltage_mv);
 
 /* LCD, NULL when the display pins are set to -1 */
 u8g2_t *board_lcd(void);

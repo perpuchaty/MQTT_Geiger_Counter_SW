@@ -1,6 +1,8 @@
 #include "ota.h"
 
+#include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_check.h"
@@ -9,6 +11,7 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
+#include "config.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -21,6 +24,7 @@ static const char *TAG = "ota";
 
 static SemaphoreHandle_t s_lock;
 static ota_status_t s_status;
+static bool s_hv_restore_on_fail;
 
 static void status_lock(void)
 {
@@ -102,6 +106,31 @@ static esp_err_t open_image(esp_https_ota_handle_t *handle, esp_app_desc_t *desc
     return err;
 }
 
+static int compare_versions(const char *candidate, const char *current)
+{
+    if (*candidate == 'v' || *candidate == 'V') candidate++;
+    if (*current == 'v' || *current == 'V') current++;
+
+    while (isdigit((unsigned char)*candidate) || isdigit((unsigned char)*current)) {
+        char *candidate_end;
+        char *current_end;
+        unsigned long candidate_part = strtoul(candidate, &candidate_end, 10);
+        unsigned long current_part = strtoul(current, &current_end, 10);
+        if (candidate_part != current_part) {
+            return candidate_part > current_part ? 1 : -1;
+        }
+        candidate = *candidate_end == '.' ? candidate_end + 1 : candidate_end;
+        current = *current_end == '.' ? current_end + 1 : current_end;
+    }
+
+    bool candidate_prerelease = *candidate == '-';
+    bool current_prerelease = *current == '-';
+    if (candidate_prerelease != current_prerelease) {
+        return candidate_prerelease ? -1 : 1;
+    }
+    return strcmp(candidate, current);
+}
+
 static void check_task(void *arg)
 {
     esp_https_ota_handle_t handle = NULL;
@@ -111,12 +140,12 @@ static void check_task(void *arg)
         esp_https_ota_abort(handle);
     }
 
-    bool available = err == ESP_OK && strcmp(candidate.version, s_status.current_version) != 0;
+    bool available = err == ESP_OK && compare_versions(candidate.version, s_status.current_version) > 0;
     status_lock();
     s_status.checking = false;
     s_status.last_error = err;
     s_status.update_available = available;
-    if (available) {
+    if (err == ESP_OK) {
         strlcpy(s_status.available_version, candidate.version, sizeof(s_status.available_version));
     } else {
         s_status.available_version[0] = '\0';
@@ -124,9 +153,11 @@ static void check_task(void *arg)
     status_unlock();
 
     if (err == ESP_OK) {
-        store_available(available ? candidate.version : NULL);
+        store_available(candidate.version);
+        ESP_LOGI(TAG, "online firmware %s, installed firmware %s",
+                 candidate.version, s_status.current_version);
         if (available) {
-            ESP_LOGI(TAG, "firmware %s is available", candidate.version);
+            ESP_LOGW(TAG, "firmware update %s is available", candidate.version);
         } else {
             ESP_LOGI(TAG, "firmware is up to date");
         }
@@ -138,6 +169,7 @@ static void check_task(void *arg)
 
 static void update_task(void *arg)
 {
+    bool restore_hv = s_hv_restore_on_fail;
     esp_https_ota_handle_t handle = NULL;
     esp_app_desc_t candidate = {0};
     esp_err_t err = open_image(&handle, &candidate);
@@ -178,6 +210,12 @@ static void update_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(500));
         esp_restart();
     } else {
+        if (restore_hv) {
+            esp_err_t hv_err = board_hv_set_enabled(true);
+            if (hv_err != ESP_OK) {
+                ESP_LOGW(TAG, "cannot restore HV after failed update: %s", esp_err_to_name(hv_err));
+            }
+        }
         ESP_LOGE(TAG, "update failed: %s", esp_err_to_name(err));
     }
     vTaskDelete(NULL);
@@ -194,18 +232,24 @@ esp_err_t ota_init(void)
     s_status.last_error = ESP_OK;
     load_available();
 
-    if (s_status.update_available &&
-        strcmp(s_status.available_version, s_status.current_version) == 0) {
-        s_status.update_available = false;
-        s_status.available_version[0] = '\0';
-        store_available(NULL);
+    if (s_status.update_available) {
+        s_status.update_available = compare_versions(s_status.available_version,
+                                                     s_status.current_version) > 0;
     }
 
-    esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "could not confirm running image: %s", esp_err_to_name(err));
-    }
     return ESP_OK;
+}
+
+esp_err_t ota_confirm_running_image(void)
+{
+    esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+    if (err == ESP_ERR_INVALID_STATE) {
+        return ESP_OK;
+    }
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "running firmware confirmed bootable");
+    }
+    return err;
 }
 
 esp_err_t ota_check_on_connect(void)
@@ -244,6 +288,17 @@ esp_err_t ota_start_update(void)
         status_unlock();
         return ESP_ERR_INVALID_STATE;
     }
+
+    bool hv_was_enabled = board_hv_is_enabled();
+    if (hv_was_enabled) {
+        esp_err_t hv_err = board_hv_set_enabled(false);
+        if (hv_err != ESP_OK) {
+            status_unlock();
+            return hv_err;
+        }
+    }
+
+    s_hv_restore_on_fail = hv_was_enabled;
     s_status.updating = true;
     s_status.progress_pct = 0;
     s_status.last_error = ESP_OK;
@@ -253,6 +308,10 @@ esp_err_t ota_start_update(void)
         status_lock();
         s_status.updating = false;
         s_status.last_error = ESP_ERR_NO_MEM;
+        if (s_hv_restore_on_fail) {
+            board_hv_set_enabled(true);
+            s_hv_restore_on_fail = false;
+        }
         status_unlock();
         return ESP_ERR_NO_MEM;
     }

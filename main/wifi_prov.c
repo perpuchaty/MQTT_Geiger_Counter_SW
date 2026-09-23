@@ -28,6 +28,8 @@
 #include "freertos/task.h"
 #include "geiger.h"
 #include "history_store.h"
+#include "host/ble_gatt.h"
+#include "host/ble_hs.h"
 #include "lcd.h"
 #include "lwip/sockets.h"
 #include "mdns.h"
@@ -52,6 +54,7 @@ static wifi_prov_method_t  s_running;
 static char                s_ap_ssid[32];
 static esp_timer_handle_t  s_portal_timer;
 static bool                s_sntp_started;
+static bool                s_radio_enabled;
 
 static void portal_stop(void);
 
@@ -83,11 +86,38 @@ static bool     s_sta_connected;
 static bool     s_sta_got_ip;
 static bool     s_sta_connecting;
 static bool     s_ble_connected;
+static uint16_t s_blufi_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static uint8_t  s_retries;
 static uint8_t  s_sta_bssid[6];
 static uint8_t  s_sta_ssid[32];
 static int      s_sta_ssid_len;
 static esp_blufi_extra_info_t s_conn_info;
+
+typedef struct {
+    uint8_t *pkt;
+    int pkt_len;
+} blufi_packet_info_t;
+
+void __wrap_esp_blufi_send_notify(void *arg)
+{
+    blufi_packet_info_t *packet = arg;
+
+    if (!s_ble_connected || s_blufi_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        ESP_LOGW(TAG, "dropping BLUFI reply without an active BLE connection");
+        return;
+    }
+
+    struct os_mbuf *buffer = ble_hs_mbuf_from_flat(packet->pkt, packet->pkt_len);
+    if (!buffer) {
+        ESP_LOGE(TAG, "failed to allocate BLUFI notification buffer");
+        return;
+    }
+
+    int rc = ble_gatts_notify_custom(s_blufi_conn_handle, gatt_values[1].val_handle, buffer);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "failed to send BLUFI notification: rc=%d", rc);
+    }
+}
 
 extern const char index_html_start[] asm("_binary_index_html_start");
 extern const char index_html_end[]   asm("_binary_index_html_end");
@@ -118,14 +148,20 @@ static void record_conn_info(int rssi, uint8_t reason)
 
 static void sta_connect(void)
 {
+    esp_err_t err;
+
     s_retries = 0;
-    s_sta_connecting = (esp_wifi_connect() == ESP_OK);
+    err = esp_wifi_connect();
+    s_sta_connecting = (err == ESP_OK);
     record_conn_info(INVALID_RSSI, INVALID_REASON);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "failed to start station connection: %s", esp_err_to_name(err));
+    }
 }
 
 static bool sta_reconnect(void)
 {
-    if (!s_sta_connecting || s_retries++ >= WIFI_STA_MAX_RETRY) {
+    if (!s_radio_enabled || !s_sta_connecting || s_retries++ >= WIFI_STA_MAX_RETRY) {
         return false;
     }
     s_sta_connecting = (esp_wifi_connect() == ESP_OK);
@@ -177,6 +213,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
     default:
         break;
     }
+    lcd_refresh();
 }
 
 static void ip_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -185,6 +222,7 @@ static void ip_event_handler(void *arg, esp_event_base_t base, int32_t id, void 
         return;
     }
     s_sta_got_ip = true;
+    lcd_refresh();
     ESP_LOGI(TAG, "got ip " IPSTR ", web ui on http://" WIFI_MDNS_HOSTNAME ".local",
              IP2STR(&((ip_event_got_ip_t *)data)->ip_info.ip));
     time_sync_start();
@@ -282,13 +320,17 @@ static void blufi_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_
 
     case ESP_BLUFI_EVENT_BLE_CONNECT:
         s_ble_connected = true;
+        s_blufi_conn_handle = param->connect.conn_id;
         esp_blufi_adv_stop();
         blufi_security_init();
+        ESP_LOGI(TAG, "BLUFI client connected; waiting for Wi-Fi credentials");
         break;
 
     case ESP_BLUFI_EVENT_BLE_DISCONNECT:
         s_ble_connected = false;
+        s_blufi_conn_handle = BLE_HS_CONN_HANDLE_NONE;
         blufi_security_deinit();
+        ESP_LOGI(TAG, "BLUFI client disconnected");
 #if SOC_MPI_SUPPORTED
         esp_blufi_adv_start();
 #else
@@ -297,14 +339,24 @@ static void blufi_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_
         break;
 
     case ESP_BLUFI_EVENT_SET_WIFI_OPMODE:
-        esp_wifi_set_mode(param->wifi_mode.op_mode);
+        ESP_LOGI(TAG, "BLUFI requested Wi-Fi mode %d", param->wifi_mode.op_mode);
+        if (esp_wifi_set_mode(param->wifi_mode.op_mode) != ESP_OK) {
+            esp_blufi_send_error_info(ESP_BLUFI_MSG_STATE_ERROR);
+        }
         break;
 
-    case ESP_BLUFI_EVENT_REQ_CONNECT_TO_AP:
+    case ESP_BLUFI_EVENT_REQ_CONNECT_TO_AP: {
+        ESP_LOGI(TAG, "BLUFI requested connection to \"%s\"", sta_cfg.sta.ssid);
         esp_wifi_disconnect();
-        esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
+        esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "failed to save BLUFI credentials: %s", esp_err_to_name(err));
+            esp_blufi_send_error_info(ESP_BLUFI_MSG_STATE_ERROR);
+            break;
+        }
         sta_connect();
         break;
+    }
 
     case ESP_BLUFI_EVENT_REQ_DISCONNECT_FROM_AP:
         esp_wifi_disconnect();
@@ -317,6 +369,8 @@ static void blufi_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_
         }
         memset(sta_cfg.sta.ssid, 0, sizeof(sta_cfg.sta.ssid));
         memcpy(sta_cfg.sta.ssid, param->sta_ssid.ssid, param->sta_ssid.ssid_len);
+        sta_cfg.sta.bssid_set = false;
+        ESP_LOGI(TAG, "BLUFI received SSID \"%s\"", sta_cfg.sta.ssid);
         break;
 
     case ESP_BLUFI_EVENT_RECV_STA_PASSWD:
@@ -326,11 +380,13 @@ static void blufi_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_
         }
         memset(sta_cfg.sta.password, 0, sizeof(sta_cfg.sta.password));
         memcpy(sta_cfg.sta.password, param->sta_passwd.passwd, param->sta_passwd.passwd_len);
+        ESP_LOGI(TAG, "BLUFI received Wi-Fi password (%d bytes)", param->sta_passwd.passwd_len);
         break;
 
     case ESP_BLUFI_EVENT_RECV_STA_BSSID:
         memcpy(sta_cfg.sta.bssid, param->sta_bssid.bssid, sizeof(sta_cfg.sta.bssid));
         sta_cfg.sta.bssid_set = 1;
+        ESP_LOGI(TAG, "BLUFI received access-point BSSID");
         break;
 
     case ESP_BLUFI_EVENT_RECV_SOFTAP_SSID:
@@ -355,6 +411,7 @@ static void blufi_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_
         break;
 
     case ESP_BLUFI_EVENT_GET_WIFI_LIST: {
+        ESP_LOGI(TAG, "BLUFI requested Wi-Fi scan");
         wifi_scan_config_t scan = { .show_hidden = true };
         if (esp_wifi_scan_start(&scan, true) != ESP_OK) {
             esp_blufi_send_error_info(ESP_BLUFI_WIFI_SCAN_FAIL);
@@ -410,6 +467,7 @@ static void blufi_stop(void)
     esp_blufi_controller_deinit();
 #endif
     s_ble_connected = false;
+    s_blufi_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 }
 
 /* =========================================================================
@@ -1126,6 +1184,11 @@ static void portal_linger_cb(void *arg)
         portal_stop();
         s_running &= ~WIFI_PROV_SOFTAP;
     }
+    if (s_running & WIFI_PROV_BLUFI) {
+        ESP_LOGI(TAG, "provisioning complete, stopping BluFi");
+        blufi_stop();
+        s_running &= ~WIFI_PROV_BLUFI;
+    }
 }
 
 static esp_err_t portal_start(void)
@@ -1199,7 +1262,9 @@ esp_err_t wifi_prov_init(void)
     snprintf(s_ap_ssid, sizeof(s_ap_ssid), "%s-%02X%02X%02X", WIFI_AP_SSID_PREFIX, mac[3], mac[4], mac[5]);
 
     record_conn_info(INVALID_RSSI, INVALID_REASON);
+    s_radio_enabled = true;
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "wifi start");
+    ESP_RETURN_ON_ERROR(esp_wifi_set_ps(WIFI_PS_MIN_MODEM), TAG, "wifi modem sleep");
 
     ESP_RETURN_ON_ERROR(mdns_start(), TAG, "mdns start");
     ESP_RETURN_ON_ERROR(http_start(), TAG, "http start");
@@ -1213,6 +1278,7 @@ esp_err_t wifi_prov_init(void)
 
 esp_err_t wifi_prov_start(wifi_prov_method_t methods)
 {
+    ESP_RETURN_ON_FALSE(s_radio_enabled, ESP_ERR_INVALID_STATE, TAG, "radio disabled");
     if ((methods & WIFI_PROV_BLUFI) && !(s_running & WIFI_PROV_BLUFI)) {
         ESP_RETURN_ON_ERROR(blufi_start(), TAG, "blufi start");
         s_running |= WIFI_PROV_BLUFI;
@@ -1234,6 +1300,39 @@ esp_err_t wifi_prov_stop(void)
     }
     s_running = WIFI_PROV_NONE;
     return ESP_OK;
+}
+
+esp_err_t wifi_radio_set_enabled(bool enabled)
+{
+    if (enabled == s_radio_enabled) {
+        return ESP_OK;
+    }
+
+    if (!enabled) {
+        s_radio_enabled = false;
+        ESP_RETURN_ON_ERROR(wifi_prov_stop(), TAG, "stop provisioning");
+        ESP_RETURN_ON_ERROR(esp_wifi_stop(), TAG, "stop wifi");
+        s_sta_connected = false;
+        s_sta_got_ip = false;
+        s_sta_connecting = false;
+        ESP_LOGI(TAG, "Wi-Fi and BLE radios disabled");
+        return ESP_OK;
+    }
+
+    s_radio_enabled = true;
+    esp_err_t err = esp_wifi_start();
+    if (err != ESP_OK) {
+        s_radio_enabled = false;
+        return err;
+    }
+    ESP_RETURN_ON_ERROR(esp_wifi_set_ps(WIFI_PS_MIN_MODEM), TAG, "wifi modem sleep");
+    ESP_LOGI(TAG, "Wi-Fi enabled with minimum modem power save");
+    return ESP_OK;
+}
+
+bool wifi_radio_is_enabled(void)
+{
+    return s_radio_enabled;
 }
 
 wifi_prov_method_t wifi_prov_running(void)
@@ -1260,7 +1359,9 @@ bool wifi_has_credentials(void)
 esp_err_t wifi_forget(void)
 {
     wifi_config_t empty = {0};
-    esp_wifi_disconnect();
+    if (s_radio_enabled) {
+        esp_wifi_disconnect();
+    }
     esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &empty);
     if (err == ESP_OK) {
         s_sta_connecting = false;

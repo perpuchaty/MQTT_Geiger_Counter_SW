@@ -28,3 +28,6 @@ idf_component_register(SRCS "config.c"
                              app_update
                              esp_https_ota
                     PRIV_REQUIRES mbedtls)
+
+# IDF 6 NimBLE can miss the Android EspBlufi CCCD event and drop every reply.
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=esp_blufi_send_notify")
