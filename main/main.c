@@ -54,7 +54,7 @@ static void tube_pulse_feedback(void)
 {
     bool feedback_active = false;
 
-    if (!lcd_lamp_test_active()) {
+    if (!lcd_menu_active()) {
         board_buzzer_on(PWM_BUZZER_FREQ_HZ, settings_get()->spk_volume);
         feedback_active = true;
     }
@@ -130,11 +130,6 @@ typedef struct {
 
 #define POWER_OFF_HOLD_US (3ULL * 1000 * 1000)
 #define POWER_SAVE_HOLD_US (3ULL * 1000 * 1000)
-#define POWER_ON_HOLD_US  (3LL * 1000 * 1000)
-#define STANDBY_BACKLIGHT_US (3LL * 1000 * 1000)
-#define STANDBY_CLEAR_US (3LL * 1000 * 1000)
-#define POWER_ON_POLL_MS 20
-#define POWER_ON_FRAME_US (200LL * 1000)
 #define STARTUP_SPLASH_MS 2500
 #define BATTERY_CUTOFF_MV 3300
 #define BATTERY_CHECK_MS 1000
@@ -391,104 +386,6 @@ static void power_management_init(void)
     ESP_LOGI(TAG, "Power management enabled: CPU 40-160 MHz, automatic light sleep");
 }
 
-static void wait_for_power_on(void)
-{
-    ESP_LOGI(TAG, "Waiting for a 3 second Enter hold");
-    int64_t pressed_since_us = 0;
-    int64_t backlight_off_at_us = esp_timer_get_time() + STANDBY_BACKLIGHT_US;
-    int64_t clear_at_us = backlight_off_at_us + STANDBY_CLEAR_US;
-    int64_t next_frame_at_us = 0;
-    uint8_t animation_frame = 0;
-    uint8_t breath_phase = 0;
-    uint8_t breath_accumulator = 0;
-    bool backlight_on = true;
-    bool screen_visible = true;
-    bool enter_was_pressed = false;
-
-    for (;;) {
-        int64_t now_us = esp_timer_get_time();
-        bool enter_pressed = !board_input_level(BOARD_IN_BTN_ENTER);
-
-        uint8_t breath_level = breath_phase <= 100 ? breath_phase : 200 - breath_phase;
-        breath_accumulator += breath_level;
-        board_set_led(breath_accumulator >= 100);
-        if (breath_accumulator >= 100) {
-            breath_accumulator -= 100;
-        }
-        breath_phase = breath_phase == 199 ? 0 : breath_phase + 1;
-
-        if (enter_pressed != enter_was_pressed) {
-            ESP_LOGI(TAG, "Startup Enter %s", enter_pressed ? "pressed" : "released");
-            enter_was_pressed = enter_pressed;
-            if (enter_pressed) {
-                lcd_wake_backlight();
-                backlight_on = true;
-                screen_visible = true;
-                next_frame_at_us = 0;
-                backlight_off_at_us = now_us + STANDBY_BACKLIGHT_US;
-                clear_at_us = backlight_off_at_us + STANDBY_CLEAR_US;
-            } else {
-                backlight_off_at_us = now_us + STANDBY_BACKLIGHT_US;
-                clear_at_us = backlight_off_at_us + STANDBY_CLEAR_US;
-            }
-        }
-
-        if (enter_pressed) {
-            if (pressed_since_us == 0) {
-                pressed_since_us = now_us;
-            } else if (now_us - pressed_since_us >= POWER_ON_HOLD_US) {
-                ESP_LOGI(TAG, "Enter held for 3 seconds, continuing startup");
-                board_set_led(false);
-                lcd_set_backlight(settings_get()->lcd_brightness);
-                return;
-            }
-        } else {
-            pressed_since_us = 0;
-        }
-
-        if (backlight_on && !enter_pressed && now_us >= backlight_off_at_us) {
-            lcd_set_backlight(0);
-            backlight_on = false;
-        }
-
-        if (screen_visible && !enter_pressed && now_us >= clear_at_us) {
-            lcd_clear();
-            screen_visible = false;
-        }
-
-        if (screen_visible && now_us >= next_frame_at_us) {
-            const settings_t *cfg = settings_get();
-            int battery_voltage_mv = 0;
-            board_adc_get_mv(BOARD_ADC_VLATCH, &battery_voltage_mv);
-            lcd_battery_state_t battery_state;
-            bool chrg_level = board_input_level(BOARD_IN_CHRG);
-            bool stby_level = board_input_level(BOARD_IN_STBY);
-            bool charger_fault = chrg_level && stby_level;
-            bool charging_active = !chrg_level && stby_level;
-
-            if (!cfg->batt_charge_en) {
-                battery_state = battery_voltage_mv > 4500 ? LCD_BATTERY_USB : LCD_BATTERY_IDLE;
-            } else {
-                if (battery_voltage_mv > 4300) {
-                    if (charger_fault) {
-                        battery_state = LCD_BATTERY_FAULT;
-                    } else if (charging_active) {
-                        battery_state = LCD_BATTERY_CHARGING;
-                    } else {
-                        battery_state = LCD_BATTERY_IDLE;
-                    }
-                } else {
-                    battery_state = LCD_BATTERY_IDLE;
-                }
-            }
-            lcd_draw_battery_status(battery_state, animation_frame++, battery_voltage_mv);
-            next_frame_at_us = now_us + POWER_ON_FRAME_US;
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(POWER_ON_POLL_MS));
-    }
-}
-
 void app_main(void)
 {
     power_management_init();
@@ -505,7 +402,6 @@ void app_main(void)
         battery_voltage_mv <= BATTERY_CUTOFF_MV) {
         deep_discharge_power_off(battery_voltage_mv);
     }
-    //wait_for_power_on();
     lcd_draw_startup_screen();
     vTaskDelay(pdMS_TO_TICKS(STARTUP_SPLASH_MS));
 

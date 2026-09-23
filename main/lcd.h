@@ -32,6 +32,7 @@ void lcd_request_power_save_confirmation(void);
 void lcd_show_deep_discharge(void);
 void lcd_fade_out_and_clear(void);
 bool lcd_lamp_test_active(void);
+bool lcd_menu_active(void);
 esp_err_t lcd_start_main_screen(void);
 void lcd_refresh(void);
 void lcd_refresh_measurements(void);

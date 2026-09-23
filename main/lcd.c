@@ -1038,6 +1038,11 @@ bool lcd_lamp_test_active(void)
     return s_lamp_test_active;
 }
 
+bool lcd_menu_active(void)
+{
+    return s_screen >= LCD_SCREEN_MENU && s_screen <= LCD_SCREEN_LAMP_TEST;
+}
+
 void lcd_refresh(void)
 {
     if (s_display_task != NULL) {
