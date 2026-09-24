@@ -116,9 +116,10 @@ voltage measured by the ADC.
 
 At boot, frequency and startup duty are initialized first. The output is then
 enabled or kept disabled according to the persisted **Generate high voltage at
-startup** setting. Its compiled-in default is enabled. The live on/off state can
-be changed from the LCD, web UI, or HTTP API, but only the separate startup
-setting is persisted across restarts.
+startup** setting. Its compiled-in default is enabled. Toggling ENABLE in the
+LCD high-voltage menu also saves this startup setting, so the chosen state
+survives a restart. The web UI and HTTP API change only the live output; use
+the separate **Generate high voltage at startup** setting to persist those changes.
 
 OTA installation disables the high-voltage output. If an update attempt fails,
 the previous enabled state is restored.

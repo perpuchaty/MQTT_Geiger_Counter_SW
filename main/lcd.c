@@ -931,7 +931,20 @@ lcd_action_t lcd_handle_button(board_input_t input, bool pressed)
     case LCD_SCREEN_HV:
         if (input == BOARD_IN_BTN_ENTER) {
             if (s_hv_field == 0) {
-                board_hv_set_enabled(!board_hv_is_enabled());
+                bool previous = board_hv_is_enabled();
+                bool enabled = !previous;
+                esp_err_t err = board_hv_set_enabled(enabled);
+                if (err == ESP_OK) {
+                    settings_t updated = *settings_get();
+                    updated.hv_start_enabled = enabled;
+                    err = settings_save(&updated);
+                    if (err != ESP_OK) {
+                        board_hv_set_enabled(previous);
+                    }
+                }
+                if (err != ESP_OK) {
+                    ESP_LOGE(TAG, "Failed to save HV state: %s", esp_err_to_name(err));
+                }
             } else {
                 s_hv_editing = !s_hv_editing;
             }
